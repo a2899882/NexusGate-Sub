@@ -594,6 +594,9 @@ async function handleAdminApi(req, res, pathname) {
         tags: asIds(body.tags).slice(0, 20), notes: cleanText(body.notes, 1000),
         createdAt: nowIso(), updatedAt: nowIso()
       };
+      if (next.expiresAt && Date.parse(next.expiresAt) <= Date.now()) {
+        next.status = 'suspended'; next.suspendReason = 'expired';
+      }
       data.customers.push(next);
       audit(data, actor, 'create_customer', next.id, { name: next.name });
       return structuredClone(next);

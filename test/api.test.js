@@ -57,6 +57,21 @@ test('admin can create resources and queue a mixed-protocol chain', async (t) =>
   const editedCustomer = (await request(`/api/customers/${customer.id}`, 'PATCH', { expiresAt: '2030-12-31T23:59:00+08:00', tags: ['VIP'] })).customer;
   assert.equal(editedCustomer.expiresAt, '2030-12-31T15:59:00.000Z');
   const chain = (await request('/api/chains', 'POST', { name: 'SG → JP', relayServerIds: [relay.id], exitServerId: exit.id, customerIds: [customer.id], relayProtocol: 'vless-reality-vision', exitProtocol: 'shadowsocks-2022-aes128' })).chain;
+  const expiredCustomer = (await request('/api/customers', 'POST', { name:'已到期测试', expiresAt:'2020-01-01T00:00:00Z' })).customer;
+  assert.equal(expiredCustomer.status, 'suspended');
+  assert.equal(expiredCustomer.suspendReason, 'expired');
+  const wrongExit = (await request('/api/chains', 'POST', { name:'误选入口为出口', relayServerIds:[relay.id], exitServerId:relay.id,
+    customerIds:[customer.id], relayProtocol:'vless-reality-vision', exitProtocol:'shadowsocks-2022-aes128' })).chain;
+  const rejectedExit = await fetch(`${base}/api/chains/${wrongExit.id}/deploy`, { method:'POST', headers:{ cookie, 'x-csrf-token':session.csrf } });
+  assert.equal(rejectedExit.status, 400);
+  assert.match((await rejectedExit.json()).message, /不能用作出口/);
+  const wrongEntry = (await request('/api/chains', 'POST', { name:'误选出口为入口', relayServerIds:[exit.id], exitServerId:exit.id,
+    customerIds:[customer.id], relayProtocol:'vless-reality-vision', exitProtocol:'shadowsocks-2022-aes128' })).chain;
+  const rejectedEntry = await fetch(`${base}/api/chains/${wrongEntry.id}/deploy`, { method:'POST', headers:{ cookie, 'x-csrf-token':session.csrf } });
+  assert.equal(rejectedEntry.status, 400);
+  assert.match((await rejectedEntry.json()).message, /不能用作入口/);
+  await request(`/api/chains/${wrongExit.id}`, 'DELETE');
+  await request(`/api/chains/${wrongEntry.id}`, 'DELETE');
   const premature = await fetch(`${base}/api/chains/${chain.id}/deploy`, { method:'POST', headers:{ cookie, 'x-csrf-token':session.csrf, 'content-type':'application/json' }, body:'{}' });
   assert.equal(premature.status, 409);
   const agentKeys = {};
