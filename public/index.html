@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f5f7fb">
+  <title>NexusGate · 枢门控制台</title>
+  <link rel="stylesheet" href="/styles.css?v=0.3.0">
+</head>
+<body>
+  <div id="login" class="login-shell hidden">
+    <section class="login-main">
+      <button class="theme-button login-theme" type="button" data-theme-toggle aria-label="切换主题">浅色</button>
+      <div class="login-card">
+        <div class="brand login-brand"><span class="brand-mark">N</span><span><b>NexusGate</b><small>枢门控制台</small></span></div>
+        <div class="login-copy">
+          <h1>欢迎回来</h1>
+        </div>
+        <form id="login-form" class="stack login-form">
+          <label>登录账号<input name="username" autocomplete="username" placeholder="请输入账号" required></label>
+          <label>登录密码<input name="password" type="password" autocomplete="current-password" required></label>
+          <button class="primary full large" type="submit">登录控制台</button>
+        </form>
+        <p id="login-error" class="form-error"></p>
+      </div>
+    </section>
+  </div>
+
+  <div id="app" class="app-shell hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand sidebar-brand"><span class="brand-mark small">N</span><span><b>NexusGate</b><small>枢门控制台</small></span></div>
+      <p class="nav-caption">工作台</p>
+      <nav id="nav">
+        <button data-page="overview" class="active"><span class="nav-icon">▦</span><span class="nav-label">概览</span></button>
+        <p class="nav-caption nav-group">资源管理</p>
+        <button data-page="servers"><span class="nav-icon">◫</span><span class="nav-label">服务器</span></button>
+        <button data-page="customers"><span class="nav-icon">◎</span><span class="nav-label">客户与订阅</span></button>
+        <button data-page="chains"><span class="nav-icon">⇄</span><span class="nav-label">转发与节点</span></button>
+        <button data-page="deployments"><span class="nav-icon">◇</span><span class="nav-label">部署与链接</span></button>
+        <button data-page="commands"><span class="nav-icon">⌘</span><span class="nav-label">安装与命令</span></button>
+        <p class="nav-caption nav-group">独立订阅 · SubVault</p>
+        <button data-page="vault-dashboard"><span class="nav-icon">⌂</span><span class="nav-label">订阅概览</span></button>
+        <button data-page="vault-subscriptions"><span class="nav-icon">↗</span><span class="nav-label">独立订阅</span></button>
+        <button data-page="vault-nodes"><span class="nav-icon">◇</span><span class="nav-label">独立节点</span></button>
+        <button data-page="vault-templates"><span class="nav-icon">▤</span><span class="nav-label">订阅模板</span></button>
+        <button data-page="vault-logs"><span class="nav-icon">◷</span><span class="nav-label">订阅日志</span></button>
+        <button data-page="vault-settings"><span class="nav-icon">⚙</span><span class="nav-label">订阅设置</span></button>
+        <p class="nav-caption nav-group">安全与系统</p>
+        <button data-page="operations"><span class="nav-icon">⚙</span><span class="nav-label">设置与运维</span></button>
+      </nav>
+      <div class="sidebar-foot"><div><span class="live-dot"></span><span id="connection-label">控制面正常</span></div><button id="logout" class="icon-button" title="退出登录">↗</button></div>
+    </aside>
+
+    <main class="main-shell">
+      <header class="topbar">
+        <button id="menu-toggle" class="icon-button mobile-only" type="button" aria-label="展开菜单">☰</button>
+        <div class="title-block"><p id="breadcrumb" class="eyebrow">NEXUSGATE / 运行总览</p><h1 id="page-title">运行总览</h1></div>
+        <div class="top-actions"><button id="refresh" class="ghost" type="button">刷新数据</button><button class="theme-button" type="button" data-theme-toggle aria-label="切换主题">浅色</button><span id="user-chip" class="user-chip"></span></div>
+      </header>
+      <div id="content" class="content"></div>
+    </main>
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="关闭菜单"></button>
+  </div>
+
+  <dialog id="modal">
+    <section class="dialog-shell">
+      <header><div><p id="modal-kicker" class="eyebrow"></p><h2 id="modal-title"></h2></div><button type="button" data-close class="icon-button" aria-label="关闭">×</button></header>
+      <div id="modal-body"></div>
+    </section>
+  </dialog>
+  <div id="toasts" aria-live="polite"></div>
+  <script src="/vendor/qrcode.js?v=0.4.0" defer></script>
+  <script src="/app.js?v=0.4.0" defer></script>
+</body>
+</html>

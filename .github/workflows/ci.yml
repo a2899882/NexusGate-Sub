@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - run: PYTHONPATH=subvault python3 -m unittest discover -s subvault/tests -v
+      - name: Shell syntax
+        run: bash -n scripts/*.sh
+  anytls-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.1'
+      - name: Install through the real lightweight Agent engine script
+        run: |
+          sudo env PATH="$PATH" NG_STATS_SOURCE="$GITHUB_WORKSPACE/agent/stats-query.go" bash scripts/agent-singbox.sh install
+      - name: AnyTLS handshake and two-way traffic counters
+        run: bash scripts/anytls-smoke.sh
+      - name: Install Xray 26.3.27 for Hysteria 2 interoperability
+        run: |
+          mkdir -p "$RUNNER_TEMP/nexusgate-xray"
+          curl -fL --retry 3 https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip -o "$RUNNER_TEMP/nexusgate-xray.zip"
+          unzip -q "$RUNNER_TEMP/nexusgate-xray.zip" xray -d "$RUNNER_TEMP/nexusgate-xray"
+      - name: Build QUIC-enabled sing-box test client
+        run: |
+          mkdir -p "$RUNNER_TEMP/nexusgate-hy2-client"
+          GOBIN="$RUNNER_TEMP/nexusgate-hy2-client" GOMAXPROCS=2 go install -trimpath -ldflags='-s -w' -p 2 -tags with_quic github.com/sagernet/sing-box/cmd/sing-box@v1.12.23
+      - name: Hysteria 2 handshake, UDP listener and two-way counters
+        run: NG_XRAY_BIN="$RUNNER_TEMP/nexusgate-xray/xray" NG_SINGBOX_BIN="$RUNNER_TEMP/nexusgate-hy2-client/sing-box" bash scripts/hy2-smoke.sh

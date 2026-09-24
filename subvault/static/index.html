@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <script>if(window.self!==window.top)document.documentElement.classList.add("embedded")</script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SubVault 订阅管理</title>
+  <link rel="stylesheet" href="/vault/static/styles.css?v=0.3.0">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <div id="appView" class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">S</span><span>SubVault</span></div>
+      <nav id="nav">
+        <a href="#dashboard" data-page="dashboard"><span class="nav-icon">⌂</span>概览</a>
+        <p class="nav-label">订阅管理</p>
+        <a href="#subscriptions" data-page="subscriptions"><span class="nav-icon">↗</span>订阅</a>
+        <a href="#nodes" data-page="nodes"><span class="nav-icon">◇</span>节点</a>
+        <a href="#templates" data-page="templates"><span class="nav-icon">▤</span>模板</a>
+        <p class="nav-label">安全与系统</p>
+        <a href="#logs" data-page="logs"><span class="nav-icon">◷</span>访问日志</a>
+        <a href="#settings" data-page="settings"><span class="nav-icon">⚙</span>设置</a>
+      </nav>
+      <div class="sidebar-foot"><span class="status-dot"></span><span>服务正常</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button id="menuBtn" class="icon-btn menu-btn" aria-label="展开菜单">☰</button>
+        <div><p id="breadcrumb" class="eyebrow">控制台</p><h2 id="pageTitle">概览</h2></div>
+        <div class="top-actions"><span id="adminName" class="admin-chip"></span><button id="logoutBtn" class="btn ghost">退出</button></div>
+      </header>
+      <div id="content" class="content"></div>
+    </main>
+  </div>
+
+  <div id="modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head"><div><p id="modalEyebrow" class="eyebrow">编辑</p><h3 id="modalTitle"></h3></div><button id="modalClose" class="icon-btn" aria-label="关闭">×</button></div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+  <script src="/vault/static/app.js?v=0.3.0" defer></script>
+</body>
+</html>

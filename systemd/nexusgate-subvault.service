@@ -1,0 +1,26 @@
+[Unit]
+Description=NexusGate SubVault subscription panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexusgate-subvault
+Group=nexusgate-subvault
+WorkingDirectory=/opt/nexusgate/subvault
+EnvironmentFile=/etc/nexusgate-subvault.env
+ExecStart=/usr/bin/python3 /opt/nexusgate/subvault/app.py --host 127.0.0.1 --port 8790
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexusgate-subvault
+CapabilityBoundingSet=
+LockPersonality=true
+TasksMax=128
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

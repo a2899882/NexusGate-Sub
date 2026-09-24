@@ -1,0 +1,26 @@
+[Unit]
+Description=NexusGate control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexusgate
+Group=nexusgate
+WorkingDirectory=/opt/nexusgate
+EnvironmentFile=/etc/nexusgate.env
+ExecStart=/usr/bin/node /opt/nexusgate/server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexusgate
+CapabilityBoundingSet=
+LockPersonality=true
+# Do not enable MemoryDenyWriteExecute here. Node/V8 needs executable
+# anonymous memory for its JIT and otherwise aborts before binding NG_PORT.
+
+[Install]
+WantedBy=multi-user.target

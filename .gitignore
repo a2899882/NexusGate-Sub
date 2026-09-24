@@ -1,0 +1,11 @@
+data/*.json
+data/*.tmp
+*.log
+node_modules/
+.DS_Store
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.env
