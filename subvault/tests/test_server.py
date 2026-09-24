@@ -3,6 +3,7 @@ import http.cookiejar
 import http.client
 import json
 import os
+import socket
 import sqlite3
 import tempfile
 import threading
@@ -61,6 +62,30 @@ class ServerTests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(self.request("/healthz")["status"], "ok")
+
+    def test_worker_limit_rejects_excess_requests_instead_of_spawning_threads(self):
+        for _ in range(self.app.max_workers):
+            self.server._slots.acquire()
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=3) as client:
+                client.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                self.assertIn(b"503 Service Unavailable", client.recv(256))
+        finally:
+            for _ in range(self.app.max_workers):
+                self.server._slots.release()
+
+    def test_node_picker_options_page_without_leaking_links(self):
+        with self.app.db.connect() as conn:
+            now = "2026-09-24T00:00:00+00:00"
+            conn.executemany(
+                "INSERT INTO nodes(name,uri,group_name,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                ((f"节点 {index}", "ss://private-credential", "测试组", 1, now, now) for index in range(1001)),
+            )
+            conn.commit()
+        first = self.request("/api/nodes/options?page=1&page_size=1000")
+        second = self.request("/api/nodes/options?page=2&page_size=1000")
+        self.assertEqual((first["total"], first["pages"], len(first["items"]), len(second["items"])), (1001, 2, 1000, 1))
+        self.assertEqual(set(second["items"][0]), {"id", "name", "group_name", "enabled"})
 
     def test_account_name_and_password_change_revoke_old_session(self):
         self.request("/api/change-account", "POST", {

@@ -133,14 +133,13 @@ function renderOverview() {
 
 function renderServers() {
   const q = state.search.toLowerCase();
-  const rows = state.servers.filter((item) => [item.name,item.region,item.publicAddress,item.publicAddressV6,...(item.labels || [])].join(' ').toLowerCase().includes(q)).map((server) => {
+  const filtered = state.servers.filter((item) => [item.name,item.region,item.publicAddress,item.publicAddressV6,...(item.labels || [])].join(' ').toLowerCase().includes(q));
+  const rows = filtered.map((server) => {
     const system = server.system || {};
     const memory = Number(system.memoryAvailable ?? system.memoryFree);
     const disk = Number(system.diskAvailable);
     const lowResource = Number.isFinite(memory) && Number.isFinite(system.memoryTotal) && (memory < 200 * 1024 * 1024 || (Number.isFinite(disk) && disk < 1024 ** 3));
     const facts = [
-      server.lastSeenAt ? `上报 ${fmtDate(server.lastSeenAt)}` : '等待注册',
-      `Agent ${esc(server.agentVersion || '未上报')}`,
       server.usage ? `计量 ${fmtDate(server.usage.lastReportAt)} · ${Number(server.usage.sampleCount || 0)} 项` : '尚无计量',
       server.tlsDomain ? `证书 ${esc(server.tlsDomain)} · ${server.engine?.certificates?.includes(server.tlsDomain) ? '已确认' : '待确认'}` : '',
       server.role !== 'exit' && server.engine ? `AnyTLS ${server.engine.singBoxInstalled ? '已安装' : '按需安装'}` : '',
@@ -158,13 +157,14 @@ function renderServers() {
       ])}</td></tr>`;
   }).join('');
   return `<div class="page-intro"><p>统一管理入口、出口与单机节点。展开某台设备可查看证书、计量和资源，异常直接显示在摘要。</p><button class="primary" data-action="add-server">＋ 添加设备</button></div>
-    <section class="panel"><div class="panel-head"><div class="toolbar"><input class="search" data-search placeholder="搜索名称、地区、IP 或标签" value="${esc(state.search)}"><span class="tag">${state.servers.length} 台</span></div></div>
+    <section class="panel"><div class="panel-head"><div class="toolbar"><input class="search" type="search" data-search placeholder="搜索名称、地区、IP 或标签" aria-label="搜索服务器" value="${esc(state.search)}"><span class="tag" data-filter-count>${filtered.length === state.servers.length ? `${state.servers.length} 台` : `${filtered.length} / ${state.servers.length} 台`}</span></div></div>
     <div class="table-wrap"><table class="server-table"><thead><tr><th>设备</th><th>用途与分组</th><th>运行状态</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="4">${empty('没有匹配设备','添加设备后生成一次性注册命令')}</td></tr>`}</tbody></table></div></section>`;
 }
 
 function renderCustomers() {
   const q = state.search.toLowerCase();
-  const rows = state.customers.filter((item) => [item.name,item.group,...(item.tags || [])].join(' ').toLowerCase().includes(q)).map((item) => {
+  const filtered = state.customers.filter((item) => [item.name,item.group,...(item.tags || [])].join(' ').toLowerCase().includes(q));
+  const rows = filtered.map((item) => {
     const percent = item.trafficLimitBytes ? Math.min(100, Math.round(item.usedBytes / item.trafficLimitBytes * 100)) : 0;
     return `<tr><td><strong>${esc(item.name)}</strong><small>${esc(item.group || '未分组')}</small></td><td>${status(item.status)}${item.status === 'suspended' ? `<small>${esc(({ traffic_limit:'额度耗尽', expired:'已到期', ip_limit:'节点 IP 超限', manual:'手动停用' })[item.suspendReason] || '待恢复')}</small>` : ''}</td>
       <td><strong>${fmtBytes(item.usedBytes)} / ${item.trafficLimitBytes ? fmtBytes(item.trafficLimitBytes) : '不限'}</strong><small>上行 ${fmtBytes(item.usedUplinkBytes)} · 下行 ${fmtBytes(item.usedDownlinkBytes)}</small><div class="progress"><i style="width:${percent}%"></i></div><small>${item.lastUsageAt ? `最后计量 ${fmtDate(item.lastUsageAt)}` : '尚未收到入口流量统计'}</small></td>
@@ -172,7 +172,7 @@ function renderCustomers() {
       <td>${rowActions(item.id, `<button data-action="edit-customer" data-id="${esc(item.id)}">编辑</button><button data-action="customer-subscription" data-id="${esc(item.id)}">订阅</button><button data-action="customer-access" data-id="${esc(item.id)}">访问</button>`, [['reset-usage','流量清零'],['toggle-customer',item.status === 'active' ? '停用' : '启用'],['delete-customer','删除客户']])}${item.pendingCleanup ? `<small>待清理 ${item.pendingCleanup} 项</small>` : ''}</td></tr>`;
   }).join('');
   return `<div class="page-intro"><p>流量按入口上行＋下行双向累计，Agent 约每分钟上报。额度、到期或节点 IP 触发暂停后，调整限制会自动恢复原节点；待 Agent 完成恢复任务，订阅才可更新。旧版已经变为草稿的线路可点“恢复原节点”。</p><button class="primary" data-action="add-customer">＋ 添加客户</button></div>
-    <section class="panel"><div class="panel-head"><div class="toolbar"><input class="search" data-search placeholder="搜索客户、分组或标签" value="${esc(state.search)}"><span class="tag">${state.customers.length} 位</span></div></div>
+    <section class="panel"><div class="panel-head"><div class="toolbar"><input class="search" type="search" data-search placeholder="搜索客户、分组或标签" aria-label="搜索客户" value="${esc(state.search)}"><span class="tag" data-filter-count>${filtered.length === state.customers.length ? `${state.customers.length} 位` : `${filtered.length} / ${state.customers.length} 位`}</span></div></div>
     <div class="table-wrap"><table><thead><tr><th>客户</th><th>状态</th><th>流量</th><th>到期</th><th>使用限制</th><th>标签</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty('还没有客户','先创建客户，再编排线路')}</td></tr>`}</tbody></table></div></section>`;
 }
 
@@ -270,7 +270,20 @@ function renderVault() {
 }
 
 function render() {
-  if (state.page.startsWith('vault-')) { $('#content').innerHTML = renderVault(); $('#content').classList.add('vault-content'); return; }
+  if (state.page.startsWith('vault-')) {
+    const frame = $('.vault-frame');
+    if (frame) {
+      const section = state.page.slice('vault-'.length);
+      if (frame.dataset.section !== section) {
+        frame.dataset.section = section;
+        frame.contentWindow.location.hash = `#${section}`;
+      }
+      return;
+    }
+    $('#content').innerHTML = renderVault();
+    $('.vault-frame').dataset.section = state.page.slice('vault-'.length);
+    $('#content').classList.add('vault-content'); return;
+  }
   $('#content').classList.remove('vault-content');
   const views = { overview: renderOverview, servers: renderServers, customers: renderCustomers, chains: renderChains, deployments: renderDeployments, commands: renderCommands, operations: renderOperations };
   $('#content').innerHTML = views[state.page]();
@@ -403,7 +416,10 @@ function expiryIso(formData) {
 }
 
 document.addEventListener('submit', async (event) => {
-  event.preventDefault(); const form = event.target; const data = new FormData(form);
+  event.preventDefault(); const form = event.target;
+  if (form.dataset.submitting) return;
+  const data = new FormData(form); const submitter = event.submitter;
+  form.dataset.submitting = 'true'; if (submitter) submitter.disabled = true;
   try {
     if (form.id === 'login-form') {
       $('#login-error').textContent = '';
@@ -431,6 +447,7 @@ document.addEventListener('submit', async (event) => {
       toast('账号已更新，请重新登录'); $('#login-form [name="username"]').value = data.get('username'); showLogin();
     }
   } catch (error) { if (form.id === 'login-form') $('#login-error').textContent = error.message; else toast(error.message, true); }
+  finally { delete form.dataset.submitting; if (submitter) submitter.disabled = false; }
 });
 
 document.addEventListener('click', async (event) => {
@@ -531,19 +548,36 @@ document.addEventListener('change', (event) => {
   }
 });
 
+function updateListSearch(input) {
+  if (!['servers','customers'].includes(state.page)) return;
+  state.search = input.value;
+  const markup = state.page === 'servers' ? renderServers() : renderCustomers();
+  const template = document.createElement('template'); template.innerHTML = markup;
+  const body = $('.table-wrap tbody');
+  if (body) body.replaceWith($('tbody', template.content));
+  const count = $('[data-filter-count]');
+  if (count) count.textContent = $('[data-filter-count]', template.content).textContent;
+}
+
 document.addEventListener('input', (event) => {
   if (event.target.matches('[data-picker-search]')) {
     const picker = event.target.closest('[data-picker]'); const query = event.target.value.trim().toLowerCase();
     $$('[data-picker-option]', picker).forEach((option) => { option.hidden = !option.dataset.query.includes(query); });
     return;
   }
-  if (event.target.matches('[data-search]')) { state.search = event.target.value; render(); const next = $('[data-search]'); next.focus(); next.setSelectionRange(next.value.length,next.value.length); }
+  if (event.target.matches('[data-search]') && !event.isComposing) updateListSearch(event.target);
+});
+document.addEventListener('compositionend', (event) => {
+  if (event.target.matches('[data-search]')) updateListSearch(event.target);
 });
 
 function closeSidebar() { $('#app').classList.remove('sidebar-open'); }
 $('#menu-toggle').addEventListener('click', () => $('#app').classList.add('sidebar-open'));
 $('#sidebar-scrim').addEventListener('click', closeSidebar);
-$('#refresh').addEventListener('click', () => load());
+$('#refresh').addEventListener('click', () => {
+  if (state.page.startsWith('vault-')) $('.vault-frame')?.contentWindow.location.reload();
+  else load();
+});
 $('#logout').addEventListener('click', async () => { try { await api('/api/auth/logout', { method:'POST', body:'{}' }); } finally { showLogin(); } });
 window.addEventListener('message', (event) => {
   if (event.origin !== location.origin || event.source !== $('.vault-frame')?.contentWindow) return;
@@ -558,5 +592,8 @@ window.addEventListener('message', (event) => {
     if (!session.authenticated) return showLogin();
     state.session = session; showApp(); setPage(initialPage());
   } catch { showLogin(); }
-  setInterval(() => { if (state.session && document.visibilityState === 'visible' && !$('#modal').open) load(); }, 45000);
+  setInterval(() => {
+    if (state.session && document.visibilityState === 'visible' && !$('#modal').open &&
+        !state.page.startsWith('vault-') && !document.activeElement?.matches('input, select, textarea')) load();
+  }, 45000);
 })();

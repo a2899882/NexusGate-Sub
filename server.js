@@ -877,14 +877,22 @@ async function requestHandler(req, res) {
   }
 }
 
+let housekeepingRunning = false;
 async function housekeeping() {
+  if (housekeepingRunning) return;
+  housekeepingRunning = true;
   try {
-    const redeployIds = await store.transaction((data) => {
+    let redeployIds = [];
+    await store.transaction((data) => {
       const now = Date.now();
+      let changed = false;
       for (const server of data.servers) {
-        if (server.lastSeenAt && now - new Date(server.lastSeenAt).getTime() > 180000) server.status = 'offline';
+        if (server.status !== 'offline' && server.lastSeenAt && now - new Date(server.lastSeenAt).getTime() > 180000) {
+          server.status = 'offline'; changed = true;
+        }
       }
       for (const job of data.jobs.filter((item) => item.status === 'running' && item.leaseUntil && new Date(item.leaseUntil).getTime() <= now)) {
+        changed = true;
         job.leaseUntil = null; job.updatedAt = nowIso();
         if (Number(job.attempts || 0) < 3) { job.status = 'queued'; job.error = 'Agent 未在租约内确认，任务已自动重试'; }
         else {
@@ -901,21 +909,28 @@ async function housekeeping() {
         const expired = customer.expiresAt && new Date(customer.expiresAt).getTime() <= now;
         const exhausted = customer.trafficLimitBytes > 0 && customer.usedBytes >= customer.trafficLimitBytes;
         if ((expired || exhausted) && customer.status === 'active') {
+          changed = true;
           customer.status = 'suspended';
           customer.suspendReason = expired ? 'expired' : 'traffic_limit';
           customer.updatedAt = nowIso();
           suspendCustomerResources(data, customer, 'system:quota');
         } else if (customer.status === 'suspended' && customer.suspendReason === 'ip_limit' && !customerBlockReason(data, customer)) {
+          changed = true;
           customer.status = 'active'; customer.suspendReason = null; customer.updatedAt = nowIso();
           resumeCustomerResources(data, customer, 'system:ip_window');
         }
       }
       const jobCutoff = now - (data.settings.completedJobRetentionDays || 7) * 86400000;
+      const jobCount = data.jobs.length;
       data.jobs = data.jobs.filter((job) => !['completed', 'failed'].includes(job.status) || new Date(job.updatedAt).getTime() > jobCutoff);
+      changed ||= data.jobs.length !== jobCount;
       const activityCutoff = now - (data.settings.activityRetentionDays || 30) * 86400000;
+      const activityCount = data.activity.length;
       data.activity = data.activity.filter((event) => new Date(event.at).getTime() > activityCutoff).slice(0, 2000);
-      pruneAccess(data, now);
-      return data.chains.filter((item) => item.status === 'redeploy_pending').map((item) => item.id);
+      changed ||= data.activity.length !== activityCount;
+      if (pruneAccess(data, now)) changed = true;
+      redeployIds = data.chains.filter((item) => item.status === 'redeploy_pending').map((item) => item.id);
+      return changed ? undefined : Store.SKIP;
     });
     for (const chainId of redeployIds) {
       try { await orchestrator.deployChain(chainId, 'system:redeploy'); }
@@ -930,6 +945,8 @@ async function housekeeping() {
     sessions.prune();
   } catch (error) {
     console.error('Housekeeping failed:', error);
+  } finally {
+    housekeepingRunning = false;
   }
 }
 

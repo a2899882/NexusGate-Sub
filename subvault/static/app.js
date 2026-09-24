@@ -1,7 +1,7 @@
 if (window.self !== window.top) document.documentElement.classList.add("embedded");
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", user: "", authMode: "standalone", nodes: [], allNodes: [], subscriptions: [], templates: [] };
+const state = { csrf: "", user: "", authMode: "standalone", nodes: [], allNodes: [], nodeOptionsAt: 0, nodeOptionsPromise: null, nodeRequest: 0, subscriptionRequest: 0, subscriptions: [], templates: [], pendingCreateSubscription: false };
 const listState = {
   nodes: {q:"", group:"", status:"all", page:1, page_size:25},
   subscriptions: {q:"", group:"", status:"all", page:1, page_size:25},
@@ -88,7 +88,7 @@ function bindBulkControls(kind,render){
   const refreshCount=()=>{count.textContent=`已选择 ${boxes().filter(box=>box.checked).length} 条`;};
   $("#selectPage").addEventListener("change",event=>{boxes().forEach(box=>{box.checked=event.target.checked;});refreshCount();});
   boxes().forEach(box=>box.addEventListener("change",refreshCount));
-  bindAction(".bulk-action",async el=>{const ids=boxes().filter(box=>box.checked).map(box=>Number(box.value));if(!ids.length){showToast("请先选择记录",true);return;}const action=el.dataset.action;let group_name="";if(action==="group"){group_name=(window.prompt("请输入目标分组名称")||"").trim();if(!group_name)return;}if(action==="delete"&&!confirmAction(`确认批量删除选中的 ${ids.length} 条记录？`))return;try{const result=await api(`/api/${endpoint}/bulk`,{method:"POST",body:JSON.stringify({ids,action,group_name})});showToast(`已处理 ${result.affected} 条记录`);await render();}catch(error){showToast(error.message,true);}});
+  bindAction(".bulk-action",async el=>{const ids=boxes().filter(box=>box.checked).map(box=>Number(box.value));if(!ids.length){showToast("请先选择记录",true);return;}const action=el.dataset.action;let group_name="";if(action==="group"){group_name=(window.prompt("请输入目标分组名称")||"").trim();if(!group_name)return;}if(action==="delete"&&!confirmAction(`确认批量删除选中的 ${ids.length} 条记录？`))return;try{const result=await api(`/api/${endpoint}/bulk`,{method:"POST",body:JSON.stringify({ids,action,group_name})});if(kind==="nodes")state.nodeOptionsAt=0;showToast(`已处理 ${result.affected} 条记录`);await render();}catch(error){showToast(error.message,true);}});
 }
 
 async function route(){
@@ -98,11 +98,14 @@ async function route(){
   $("#pageTitle").textContent=titles[chosen];$("#breadcrumb").textContent=`控制台 / ${titles[chosen]}`;$(".sidebar").classList.remove("open");
   $("#content").innerHTML=`<div class="panel">${empty("正在载入","请稍候…")}</div>`;
   try { await ({dashboard:renderDashboard,subscriptions:renderSubscriptions,nodes:renderNodes,templates:renderTemplates,logs:renderLogs,settings:renderSettings}[chosen])(); }
-  catch(error){$("#content").innerHTML=`<div class="panel">${empty("加载失败",error.message)}</div>`;showToast(error.message,true);}
+  catch(error){if ((location.hash||"#dashboard").slice(1)===chosen) {$("#content").innerHTML=`<div class="panel">${empty("加载失败",error.message)}</div>`;showToast(error.message,true);}}
 }
+
+function showing(page) { return (location.hash || "#dashboard").slice(1) === page; }
 
 async function renderDashboard(){
   const {totals,recent}=await api("/api/dashboard");
+  if (!showing("dashboard")) return;
   $("#content").innerHTML=`
     <section class="hero"><div><h3>欢迎回来，${escapeHtml(state.user)}</h3><p>集中管理私人订阅、节点分发和访问边界。</p></div><button class="btn primary" id="quickSub">＋ 新建订阅</button></section>
     <section class="stats">
@@ -114,13 +117,15 @@ async function renderDashboard(){
       </div>
       <div class="panel"><div class="panel-head"><div><h3>累计已上报流量</h3><p>由节点采集器主动上报</p></div></div><strong style="font-size:32px">${fmtBytes(totals.traffic_used)}</strong><div class="notice warning" style="margin-top:20px">面板无法从普通节点链接自动读取真实流量。接入采集器后，配额才可对代理流量准确计数。</div></div>
     </section>`;
-  $("#quickSub").addEventListener("click",()=>{location.hash="#subscriptions";setTimeout(()=>$("#addSubscription")?.click(),120);});
+  $("#quickSub").addEventListener("click",()=>{state.pendingCreateSubscription=true;location.hash="#subscriptions";});
 }
 function stat(label,value,icon){return `<div class="stat-card"><div class="stat-top"><span>${label}</span><i class="stat-badge">${icon}</i></div><strong>${value}</strong></div>`;}
 
-async function loadAllNodes(){state.allNodes=(await api("/api/nodes?page=1&page_size=1000")).items;return state.allNodes;}
 async function renderNodes(){
-  const data=await api(`/api/nodes?${listQuery("nodes")}`),nodes=data.items;state.nodes=nodes;
+  const request=++state.nodeRequest;
+  const data=await api(`/api/nodes?${listQuery("nodes")}`),nodes=data.items;
+  if (!showing("nodes") || request!==state.nodeRequest) return;
+  state.nodes=nodes;
   if(data.page>data.pages){listState.nodes.page=data.pages;return renderNodes();}
   $("#content").innerHTML=`<section class="panel"><div class="panel-head"><div><h3>节点列表</h3><p>支持 SS、VMess、VLESS、Trojan、Hysteria2 与 TUIC</p></div><div class="toolbar"><button class="btn primary" id="addNode">＋ 添加 / 批量导入</button></div></div>
     ${filtersBar("nodes",data,"搜索名称、分组或链接",[["all","全部状态"],["enabled","已启用"],["disabled","已停用"]])}
@@ -129,7 +134,7 @@ async function renderNodes(){
   $("#addNode").addEventListener("click",()=>nodeModal());
   bindListControls("nodes",data,renderNodes);bindBulkControls("nodes",renderNodes);
   bindAction(".edit-node",el=>nodeModal(nodes.find(n=>n.id===Number(el.dataset.id))));
-  bindAction(".delete-node",async el=>{if(!confirmAction("删除节点后，它会从所有订阅中移除。继续吗？"))return;el.disabled=true;try{await api(`/api/nodes/${el.dataset.id}`,{method:"DELETE",body:"{}"});await renderNodes();showToast("节点已删除");}catch(e){el.disabled=false;showToast(e.message,true);}});
+  bindAction(".delete-node",async el=>{if(!confirmAction("删除节点后，它会从所有订阅中移除。继续吗？"))return;el.disabled=true;try{await api(`/api/nodes/${el.dataset.id}`,{method:"DELETE",body:"{}"});state.nodeOptionsAt=0;await renderNodes();showToast("节点已删除");}catch(e){el.disabled=false;showToast(e.message,true);}});
 }
 function nodeModal(node=null){
   openModal(node?"编辑节点":"添加节点",`<form id="nodeForm" class="form-grid">
@@ -139,15 +144,33 @@ function nodeModal(node=null){
     <label class="span-2">${node?"节点链接":"节点链接（每行一条，可批量导入）"}<textarea name="uris" class="code-area" required>${escapeHtml(node?.uri||"")}</textarea><p class="help">节点机密会存入 SQLite，请保护数据库备份。</p></label>
     <div class="form-actions span-2"><button type="button" class="btn ghost modal-cancel">取消</button><button class="btn primary" type="submit">${node?"保存":"导入节点"}</button></div></form>`,node?"节点":"批量导入");
   $(".modal-cancel").addEventListener("click",closeModal);
-  $("#nodeForm").addEventListener("submit",async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const lines=String(fd.get("uris")).split(/\r?\n/).map(x=>x.trim()).filter(Boolean);const payload={name:fd.get("name")||"",group_name:fd.get("group_name"),enabled:fd.get("enabled")==="on",...(node?{uri:lines[0]}:{uris:lines})};try{await api(node?`/api/nodes/${node.id}`:"/api/nodes",{method:node?"PUT":"POST",body:JSON.stringify(payload)});closeModal();showToast(node?"节点已更新":`已导入 ${lines.length} 个节点`);renderNodes();}catch(err){showToast(err.message,true);}});
+  $("#nodeForm").addEventListener("submit",async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);const lines=String(fd.get("uris")).split(/\r?\n/).map(x=>x.trim()).filter(Boolean);const payload={name:fd.get("name")||"",group_name:fd.get("group_name"),enabled:fd.get("enabled")==="on",...(node?{uri:lines[0]}:{uris:lines})};try{await api(node?`/api/nodes/${node.id}`:"/api/nodes",{method:node?"PUT":"POST",body:JSON.stringify(payload)});state.nodeOptionsAt=0;closeModal();showToast(node?"节点已更新":`已导入 ${lines.length} 个节点`);await renderNodes();}catch(err){showToast(err.message,true);}});
+}
+
+async function loadAllNodes(){
+  if (state.nodeOptionsAt && Date.now()-state.nodeOptionsAt < 60000) return state.allNodes;
+  if (!state.nodeOptionsPromise) state.nodeOptionsPromise=(async()=>{
+    const first=await api("/api/nodes/options?page=1&page_size=1000");
+    const all=[...first.items];
+    for(let page=2;page<=first.pages;page++) {
+      const next=await api(`/api/nodes/options?page=${page}&page_size=1000`);
+      all.push(...next.items);
+    }
+    state.allNodes=all;state.nodeOptionsAt=Date.now();return all;
+  })();
+  try {return await state.nodeOptionsPromise;} finally {state.nodeOptionsPromise=null;}
 }
 
 async function renderSubscriptions(){
-  const [data]=await Promise.all([api(`/api/subscriptions?${listQuery("subscriptions")}`),loadAllNodes()]);state.subscriptions=data.items;state.templates=data.templates;
+  const request=++state.subscriptionRequest;
+  const [data]=await Promise.all([api(`/api/subscriptions?${listQuery("subscriptions")}`),loadAllNodes()]);
+  if (!showing("subscriptions") || request!==state.subscriptionRequest) return;
+  state.subscriptions=data.items;state.templates=data.templates;
   if(data.page>data.pages){listState.subscriptions.page=data.pages;return renderSubscriptions();}
   const rows=state.subscriptions.map(sub=>{const st=statusOf(sub),pct=sub.traffic_limit_bytes?Math.min(100,sub.traffic_used_bytes/sub.traffic_limit_bytes*100):0;return `<tr><td class="check-col"><input class="subscriptions-select" type="checkbox" value="${sub.id}" aria-label="选择 ${escapeHtml(sub.name)}"></td><td><div class="cell-main">${escapeHtml(sub.name)}</div><div class="cell-sub">${escapeHtml(sub.group_name)} · ${sub.node_ids.length} 个节点 · #${sub.id}</div></td><td>${badge(st[0],st[1])}</td><td><div>${fmtBytes(sub.traffic_used_bytes)} / ${sub.traffic_limit_bytes?fmtBytes(sub.traffic_limit_bytes):"不限"}</div><div class="progress"><i style="width:${pct}%"></i></div></td><td><div>IP ${sub.ip_limit||"不限"} · 设备 ${sub.device_limit||"不限"}</div><div class="cell-sub">${sub.access_window_hours} 小时活跃窗口</div></td><td>${fmtDate(sub.expires_at)}</td><td><div class="actions"><button class="link-btn links-sub" data-id="${sub.id}">链接</button><button class="link-btn access-sub" data-id="${sub.id}">访问</button><button class="link-btn edit-sub" data-id="${sub.id}">编辑</button><button class="link-btn delete-sub" data-id="${sub.id}">删除</button></div></td></tr>`;}).join("");
   $("#content").innerHTML=`<section class="panel"><div class="panel-head"><div><h3>订阅列表</h3><p>每个订阅拥有独立随机 Token 与访问策略</p></div><button class="btn primary" id="addSubscription">＋ 新建订阅</button></div>${filtersBar("subscriptions",data,"搜索名称、分组或备注",[["all","全部状态"],["active","有效"],["disabled","已停用"],["expired","已到期"],["exhausted","流量耗尽"]])}<div class="bulk-bar"><span id="selectedCount">已选择 0 条</span><div><button class="btn small bulk-action" data-action="enable">启用</button><button class="btn small bulk-action" data-action="disable">停用</button><button class="btn small bulk-action" data-action="group">移动分组</button><button class="btn small danger bulk-action" data-action="delete">批量删除</button></div></div><div class="table-wrap"><table class="table"><thead><tr><th class="check-col"><input id="selectPage" type="checkbox" aria-label="选择本页"></th><th>订阅</th><th>状态</th><th>已上报流量</th><th>访问限制</th><th>到期时间</th><th></th></tr></thead><tbody>${rows}</tbody></table>${rows?"":empty("没有匹配的订阅","调整搜索条件或新建订阅")}</div>${paginationBar("subscriptions",data)}</section>`;
   $("#addSubscription").addEventListener("click",()=>subscriptionModal());
+  if (state.pendingCreateSubscription) { state.pendingCreateSubscription=false; $("#addSubscription").click(); }
   bindListControls("subscriptions",data,renderSubscriptions);bindBulkControls("subscriptions",renderSubscriptions);
   bindAction(".edit-sub",el=>subscriptionModal(state.subscriptions.find(s=>s.id===Number(el.dataset.id))));
   bindAction(".links-sub",el=>linksModal(state.subscriptions.find(s=>s.id===Number(el.dataset.id))));
@@ -190,6 +213,7 @@ async function accessModal(sub){
 
 async function renderTemplates(){
   state.templates=(await api("/api/templates")).items;
+  if (!showing("templates")) return;
   $("#content").innerHTML=`<section class="panel"><div class="panel-head"><div><h3>输出模板</h3><p>常用客户端模板已内置，可复制并定制</p></div><button class="btn primary" id="addTemplate">＋ 新建模板</button></div><div class="table-wrap"><table class="table"><thead><tr><th>模板</th><th>目标客户端</th><th>属性</th><th>更新时间</th><th></th></tr></thead><tbody>${state.templates.map(t=>`<tr><td class="cell-main">${escapeHtml(t.name)}</td><td>${badge(t.target.toUpperCase())}</td><td>${badge(t.builtin?"内置":"自定义",t.builtin?"ok":"blue")}</td><td>${fmtDate(t.updated_at)}</td><td><div class="actions"><button class="link-btn edit-template" data-id="${t.id}">编辑</button>${t.builtin?"":`<button class="link-btn delete-template" data-id="${t.id}">删除</button>`}</div></td></tr>`).join("")}</tbody></table></div></section>`;
   $("#addTemplate").addEventListener("click",()=>templateModal());bindAction(".edit-template",el=>templateModal(state.templates.find(t=>t.id===Number(el.dataset.id))));bindAction(".delete-template",async el=>{if(!confirmAction("确认删除这个自定义模板？"))return;el.disabled=true;try{await api(`/api/templates/${el.dataset.id}`,{method:"DELETE",body:"{}"});await renderTemplates();showToast("模板已删除");}catch(e){el.disabled=false;showToast(e.message,true);}});
 }
@@ -199,12 +223,14 @@ function templateModal(t=null){
 
 async function renderLogs(){
   const [{items},settings]=await Promise.all([api("/api/logs?limit=300"),api("/api/settings")]);
+  if (!showing("logs")) return;
   $("#content").innerHTML=`<section class="panel"><div class="panel-head"><div><h3>访问日志</h3><p>自动保留 ${settings.log_retention_days} 天且最多 ${settings.max_access_log_rows.toLocaleString()} 条；当前 ${settings.access_log_rows.toLocaleString()} 条</p></div><button class="btn ghost" id="refreshLogs">刷新</button></div><div class="table-wrap"><table class="table"><thead><tr><th>时间</th><th>订阅</th><th>结果</th><th>IP / 客户端</th><th>格式</th><th>返回大小</th></tr></thead><tbody>${items.map(l=>`<tr><td>${fmtDate(l.happened_at)}</td><td class="cell-main">${escapeHtml(l.subscription_name||"未知")}</td><td>${badge(l.reason,l.allowed?"ok":"bad")}</td><td><div>${escapeHtml(l.ip)}</div><div class="cell-sub truncate">${escapeHtml(l.device)}</div></td><td>${escapeHtml(l.target)}</td><td>${fmtBytes(l.response_bytes)}</td></tr>`).join("")}</tbody></table>${items.length?"":empty("暂无日志","拉取订阅后会在此显示")}</div></section>`;$("#refreshLogs").addEventListener("click",renderLogs);
 }
 
 async function renderSettings(){
   const s=await api("/api/settings");
-  $("#content").innerHTML=`<section class="grid-two"><div class="panel"><div class="panel-head"><div><h3>运行信息</h3><p>当前实例配置</p></div>${badge(`v${s.version}`,"blue")}</div><div class="form-stack"><div><p class="eyebrow">PUBLIC URL</p><strong>${escapeHtml(s.public_url||"未设置")}</strong></div><div><p class="eyebrow">DATABASE + WAL</p><strong>${fmtBytes(s.database_bytes)}</strong></div><div><p class="eyebrow">磁盘空间</p><strong>可用 ${fmtBytes(s.disk_free_bytes)} / 共 ${fmtBytes(s.disk_total_bytes)}</strong></div><div><p class="eyebrow">自动清理</p><strong>访问日志 ${s.log_retention_days} 天 / 流量明细 ${s.usage_retention_days} 天</strong><p class="help">当前 ${s.access_log_rows.toLocaleString()} 条访问日志，${s.usage_report_rows.toLocaleString()} 条流量明细；每 ${Math.round(s.cleanup_interval_seconds/3600*10)/10} 小时检查一次。</p></div><div><p class="eyebrow">USAGE REPORTING</p>${badge(s.usage_reporting?"已配置":"未配置",s.usage_reporting?"ok":"warn")}</div><div><p class="eyebrow">PROTOCOLS</p><p>${s.supported_protocols.map(x=>badge(x.toUpperCase())).join(" ")}</p></div></div><div class="notice warning" style="margin-top:20px">真实流量限制需要节点按订阅 Token 上报用量；普通节点链接本身不具备用户级计量能力。</div></div>
+  if (!showing("settings")) return;
+  $("#content").innerHTML=`<section class="grid-two settings-layout"><div class="panel"><div class="panel-head"><div><h3>运行信息</h3><p>当前实例配置</p></div>${badge(`v${s.version}`,"blue")}</div><div class="settings-grid"><div><p class="eyebrow">PUBLIC URL</p><strong>${escapeHtml(s.public_url||"未设置")}</strong></div><div><p class="eyebrow">DATABASE + WAL</p><strong>${fmtBytes(s.database_bytes)}</strong></div><div><p class="eyebrow">磁盘空间</p><strong>可用 ${fmtBytes(s.disk_free_bytes)} / 共 ${fmtBytes(s.disk_total_bytes)}</strong></div><div><p class="eyebrow">自动清理</p><strong>访问日志 ${s.log_retention_days} 天 / 流量明细 ${s.usage_retention_days} 天</strong><p class="help">当前 ${s.access_log_rows.toLocaleString()} 条访问日志，${s.usage_report_rows.toLocaleString()} 条流量明细；每 ${Math.round(s.cleanup_interval_seconds/3600*10)/10} 小时检查一次。</p></div><div><p class="eyebrow">并发保护</p><strong>最多 ${s.max_workers} 个请求线程</strong><p class="help">超出时暂时返回 503，避免内存耗尽。</p></div><div><p class="eyebrow">USAGE REPORTING</p>${badge(s.usage_reporting?"已配置":"未配置",s.usage_reporting?"ok":"warn")}</div><div><p class="eyebrow">PROTOCOLS</p><p>${s.supported_protocols.map(x=>badge(x.toUpperCase())).join(" ")}</p></div></div><div class="notice warning" style="margin-top:16px">真实流量限制需要节点按订阅 Token 上报用量；普通节点链接本身不具备用户级计量能力。</div></div>
     <div class="panel"><div class="panel-head"><div><h3>管理员账号</h3><p>${state.authMode==="nexusgate"?"统一使用 NexusGate 账号":"修改账号或密码后需要重新登录"}</p></div></div>${state.authMode==="nexusgate"?`<div class="form-stack"><p>此服务由 NexusGate 会话授权。请在 NexusGate 的“设置与运维”修改账号或密码；更改后这里会同步生效。</p><button class="btn primary" id="openGateSettings" type="button">前往账号设置</button></div>`:`<form id="accountForm" class="form-stack"><label>管理员账号<input name="username" value="${escapeHtml(state.user)}" autocomplete="username" minlength="3" maxlength="64" required></label><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码（留空不修改）<input name="new_password" type="password" autocomplete="new-password" minlength="10"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10"></label><button class="btn primary" type="submit">保存账号</button></form>`}</div></section>
     <section class="panel" style="margin-top:18px"><div class="panel-head"><div><h3>流量上报示例</h3><p>密钥从服务器 /etc/nexusgate-subvault.env 读取，不要放进公开仓库</p></div></div><div class="mono-card">curl -X POST '${escapeHtml(s.public_url)}/api/v1/usage' \\\n+  -H 'Authorization: Bearer YOUR_USAGE_REPORT_KEY' \\\n+  -H 'Content-Type: application/json' \\\n+  -d '{"subscription_token":"TOKEN","upload_bytes":1048576,"download_bytes":2097152,"source":"node-a"}'</div></section>`;
   if(state.authMode==="nexusgate") $("#openGateSettings").addEventListener("click",()=>{

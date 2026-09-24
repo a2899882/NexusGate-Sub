@@ -116,6 +116,7 @@ class App:
         self.max_access_log_rows = env_int("SUBVAULT_MAX_ACCESS_LOG_ROWS", 100000, 1000, 10000000)
         self.max_usage_report_rows = env_int("SUBVAULT_MAX_USAGE_REPORT_ROWS", 100000, 1000, 10000000)
         self.cleanup_interval = env_int("SUBVAULT_CLEANUP_INTERVAL_SECONDS", 21600, 300, 604800)
+        self.max_workers = env_int("SUBVAULT_MAX_WORKERS", 24, 4, 64)
         self.login_attempts = {}
         self.login_lock = threading.Lock()
         self.cleanup_lock = threading.Lock()
@@ -164,7 +165,9 @@ class App:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SubVault"
-    protocol_version = "HTTP/1.1"
+    # Caddy is the only upstream; closing after each response keeps idle
+    # keep-alive sockets from occupying the bounded request worker pool.
+    protocol_version = "HTTP/1.0"
     app: App
 
     def log_message(self, fmt, *args):
@@ -193,7 +196,6 @@ class Handler(BaseHTTPRequestHandler):
             self._body_cache = None
             if method in ("POST", "PUT", "DELETE"):
                 self._body_cache = self._read_request_body()
-            self.app.cleanup(force=False)
             split = urlsplit(self.path)
             path = split.path
             query = parse_qs(split.query)
@@ -239,6 +241,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.list_nodes(query)
             if method == "POST":
                 return self.create_nodes()
+        if path == "/api/nodes/options" and method == "GET":
+            return self.node_options(query)
         if path == "/api/nodes/bulk" and method == "POST":
             return self.bulk_nodes()
         match = re.fullmatch(r"/api/nodes/(\d+)", path)
@@ -515,6 +519,18 @@ class Handler(BaseHTTPRequestHandler):
             "items": rows, "groups": groups, "total": total, "page": page, "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size),
         })
+
+    def node_options(self, query):
+        """Return only picker labels, never all node credentials for a subscription form."""
+        page, page_size, offset = pagination(query)
+        with self.app.db.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            rows = rows_to_dicts(conn.execute(
+                "SELECT id,name,group_name,enabled FROM nodes ORDER BY id LIMIT ? OFFSET ?",
+                (page_size, offset),
+            ).fetchall())
+        self.send_json({"items": rows, "total": total, "page": page,
+                        "pages": max(1, (total + page_size - 1) // page_size)})
 
     def create_nodes(self):
         data = self.read_json()
@@ -880,6 +896,7 @@ class Handler(BaseHTTPRequestHandler):
             "usage_retention_days": self.app.usage_retention_days,
             "max_access_log_rows": self.app.max_access_log_rows,
             "max_usage_report_rows": self.app.max_usage_report_rows,
+            "max_workers": self.app.max_workers,
             "cleanup_interval_seconds": self.app.cleanup_interval,
             "last_cleanup_at": self.app.last_cleanup_at,
         })
@@ -1077,9 +1094,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "traffic_used_bytes": updated["traffic_used_bytes"], "remaining_bytes": remaining, "allowed": not bool(self._subscription_precheck(updated))})
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """Bound request threads so slow clients cannot exhaust a small VPS."""
+    request_queue_size = 64
+
+    def __init__(self, address, handler, max_workers):
+        self._slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(15)
+        return request, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def make_server(host: str, port: int, app: App):
     handler = type("SubVaultHandler", (Handler,), {"app": app})
-    return ThreadingHTTPServer((host, port), handler)
+    return BoundedHTTPServer((host, port), handler, app.max_workers)
 
 
 def main():
@@ -1090,12 +1141,21 @@ def main():
     app = App()
     app.cleanup()
     server = make_server(args.host, args.port, app)
+    stop = threading.Event()
+    def maintenance():
+        while not stop.wait(app.cleanup_interval):
+            try:
+                app.cleanup()
+            except Exception as exc:
+                print(f"SubVault cleanup failed: {type(exc).__name__}: {exc}")
+    threading.Thread(target=maintenance, name="subvault-cleanup", daemon=True).start()
     print(f"SubVault {__version__} listening on {args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
         server.server_close()
 
 

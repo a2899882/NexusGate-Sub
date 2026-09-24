@@ -48,6 +48,8 @@ ng account                        # 修改统一管理员账号和密码
 
 恢复应在相同试验版完成安装的机器上进行。备份含管理员设置、桥接密钥、令牌与节点凭据，文件默认 0600，请放在安全位置。原 NexusGate 旧版备份可以恢复，但没有 SubVault 数据；SubVault 旧项目数据库也不会自动迁移。更新只替换源代码和 systemd 单元，不重置两个数据目录。SubVault 的访问日志、上报明细和非活跃绑定会按它原有清理策略定期删除。联合安装版不再把包含订阅 Token 的 URL 写入 Caddy 访问日志；升级后会删除旧版的受管访问日志及轮转文件，SubVault 服务日志也会遮盖订阅 Token 和二维码参数。面板 CPU 和内存随请求、节点规模以及日志量变化，安装器不承诺固定资源占用。
 
+空闲时 NexusGate 不再每分钟重写数据文件；SubVault 清理在独立后台线程执行，默认每 6 小时检查一次。SubVault 默认最多同时处理 24 个请求线程，忙时返回 503 并建议客户端稍后重试，避免小内存 VPS 因慢连接无限创建线程；如需调整，在 `/etc/nexusgate-subvault.env` 设置如 `SUBVAULT_MAX_WORKERS=32`（允许 4–64）并重启服务。订阅编辑器只加载节点名称与分组，超过 1000 个节点也会继续分页取全。上述限制保护控制面进程，无法替代入口和落地机的带宽与连接数容量测试。
+
 ### 从已有 dingyue 搬迁数据（可选）
 
 先给旧实例停写并备份；只将其 SQLite 数据库复制到新机器的 `/var/lib/nexusgate-subvault/subvault.db`，保留新机 `/etc/nexusgate-subvault.env` 中的站点域名、管理员启动密钥与上报密钥配置，或按原实例的密钥迁移。复制前停止 `nexusgate-subvault` 服务，复制后设置 `nexusgate-subvault:nexusgate-subvault` 所有权，再启动服务。数据库及其 WAL 文件必须来自一致的离线副本。此操作会覆盖试验机上的 SubVault 数据；先运行 `ng backup`。若旧库中的管理员密码哈希与新环境不同，使用原项目的管理员恢复流程。NexusGate 数据无需迁移即可空白测试。

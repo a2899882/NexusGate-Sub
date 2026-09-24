@@ -109,3 +109,12 @@ table{font-size:13px}th{font-size:11px;letter-spacing:.02em}td strong{font-size:
 /* Compact server rows keep optional diagnostics one click away. */
 .server-table{min-width:970px}.server-table th:nth-child(3){width:48%}.server-table td{padding-top:9px;padding-bottom:9px}.server-table .server-summary{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;color:var(--muted);font-size:11px}.server-table .server-details{margin-top:3px;color:var(--muted);font-size:11px}.server-table .server-details summary{cursor:pointer;width:max-content;color:var(--primary)}.server-facts{display:flex;gap:7px 15px;flex-wrap:wrap;padding:7px 0 3px;line-height:1.5}.server-facts span{max-width:330px;overflow-wrap:anywhere}.server-table .error-detail{color:var(--danger)}
 .vault-content{max-width:none;padding:16px 22px 0}.vault-intro{max-width:1460px;margin:0 auto 10px}.vault-frame{display:block;width:100%;height:calc(100vh - 177px);min-height:520px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+
+/* Keep search and diagnostic controls steady while lists refresh. */
+.toolbar [data-filter-count]{flex:0 0 auto;margin:0;font-variant-numeric:tabular-nums}
+.server-table .server-summary{min-height:26px}.server-table .server-details summary{padding:3px 0}
+.server-table .server-details[open] summary{font-weight:700}
+.server-table .server-facts span{padding:3px 7px;border-radius:6px;background:var(--surface-soft)}
+button:focus-visible,.multi-picker>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+@media(max-width:570px){.vault-content{padding:10px 10px 0}.vault-frame{height:calc(100vh - 150px);min-height:420px}}
+@media(prefers-reduced-motion:reduce){button,#nav button,.sidebar{transition:none}}
