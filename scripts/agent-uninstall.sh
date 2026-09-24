@@ -28,6 +28,7 @@ if command -v rc-service >/dev/null; then
   rm -f -- /etc/init.d/nexusgate-agent /etc/init.d/nexusgate-xray /etc/init.d/nexusgate-sing-box
   rm -f -- /etc/periodic/daily/nexusgate-cert-renew
   rm -f -- /etc/periodic/hourly/nexusgate-agent-logrotate
+  rm -f -- /etc/periodic/15min/nexusgate-agent-logrotate
 fi
 
 rm -rf -- /opt/nexusgate-agent /etc/nexusgate /var/log/nexusgate

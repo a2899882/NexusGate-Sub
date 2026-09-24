@@ -628,6 +628,11 @@ async function pollLoop() {
 
 async function main() {
   if (!CONTROLLER || !AGENT_KEY) throw new Error('NG_CONTROLLER and NG_AGENT_KEY are required');
+  const managementUrl = new URL(CONTROLLER);
+  if (managementUrl.protocol !== 'https:' || managementUrl.username || managementUrl.password ||
+      managementUrl.pathname !== '/' || managementUrl.search || managementUrl.hash) {
+    throw new Error('NG_CONTROLLER must be an HTTPS origin without credentials, path or query');
+  }
   ensureDirectories();
   log(`NexusGate Agent v${VERSION} starting`);
   // Keep the control channel alive even when a stale node configuration cannot start.

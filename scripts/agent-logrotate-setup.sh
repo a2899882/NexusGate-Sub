@@ -17,12 +17,12 @@ ExecStart=$logrotate_bin -s /etc/nexusgate/logrotate.status $config
 EOF
   cat > /etc/systemd/system/nexusgate-agent-logrotate.timer <<'EOF'
 [Unit]
-Description=Check NexusGate node log size hourly
+Description=Check NexusGate node log size every 15 minutes
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:0/15
 Persistent=true
-RandomizedDelaySec=5m
+RandomizedDelaySec=1m
 
 [Install]
 WantedBy=timers.target
@@ -30,12 +30,13 @@ EOF
   systemctl daemon-reload
   systemctl enable --now nexusgate-agent-logrotate.timer
 elif command -v rc-service >/dev/null; then
-  install -d -m 0755 /etc/periodic/hourly
-  cat > /etc/periodic/hourly/nexusgate-agent-logrotate <<EOF
+  install -d -m 0755 /etc/periodic/15min
+  cat > /etc/periodic/15min/nexusgate-agent-logrotate <<EOF
 #!/bin/sh
 $logrotate_bin -s /etc/nexusgate/logrotate.status $config
 EOF
-  chmod 0755 /etc/periodic/hourly/nexusgate-agent-logrotate
+  chmod 0755 /etc/periodic/15min/nexusgate-agent-logrotate
+  rm -f -- /etc/periodic/hourly/nexusgate-agent-logrotate
 else
   printf '未检测到 systemd 或 OpenRC，日志轮转定时器未安装\n' >&2
   exit 1

@@ -479,8 +479,8 @@ document.addEventListener('click', async (event) => {
       chainForm(state.chains.find((item) => item.id === itemId));
     } else if (action === 'enroll-server') {
       const result = await api(`/api/servers/${itemId}/enrollment-token`, { method:'POST', body:'{}' });
-      const command = `curl -fsSL https://raw.githubusercontent.com/a2899882/NexusGate-Sub/main/scripts/agent-install.sh | bash -s -- --server ${location.origin} --token ${result.token}`;
-      modal('ONE-TIME ENROLLMENT', 'Agent 注册 / 重装命令', `<div class="stack"><div class="notice">令牌 30 分钟内有效且只能使用一次。重装会保留本机资源文件，并在 Agent 重启后自动与控制面对账。</div><div class="codebox">${esc(command)}</div><button class="primary" data-action="copy-uri" data-value="${esc(command)}">复制命令</button></div>`);
+      const command = `curl -fsSL https://raw.githubusercontent.com/a2899882/NexusGate-Sub/main/scripts/agent-install.sh | bash -s -- --server ${location.origin} --token-prompt`;
+      modal('ONE-TIME ENROLLMENT', 'Agent 注册 / 重装命令', `<div class="stack"><div class="notice">在目标机执行命令后，按提示粘贴下方令牌；输入不会显示，也不会写进 shell 历史或命令参数。令牌 30 分钟内有效且只能使用一次。若安装耗时过长，重新生成令牌再粘贴。重装会保留本机资源文件，并在 Agent 重启后自动与控制面对账。</div><div class="codebox">${esc(command)}</div><button class="primary" data-action="copy-uri" data-value="${esc(command)}">复制安装命令</button><div class="codebox secret-value">${esc(result.token)}</div><button class="secondary" data-action="copy-uri" data-value="${esc(result.token)}">复制一次性令牌</button></div>`);
     } else if (action === 'copy-uri') { await navigator.clipboard.writeText(button.dataset.value); toast('已复制到剪贴板'); }
     else if (action === 'qr-uri') {
       const target = $('.subscription-qr', button.closest('.subscription-row'));

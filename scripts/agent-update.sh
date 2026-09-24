@@ -7,6 +7,14 @@ die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 info() { printf '\033[1;36m[NexusGate Agent]\033[0m %s\n' "$*"; }
 [[ "${EUID}" -eq 0 ]] || die "请使用 root 运行"
 [[ -f /etc/nexusgate/agent.env ]] || die "未检测到已安装的 NexusGate Agent"
+controller_url="$(NG_ENV_FILE=/etc/nexusgate/agent.env bash -c 'source "$NG_ENV_FILE"; printf "%s" "${NG_CONTROLLER:-}"')"
+CONTROLLER_URL="$controller_url" node -e '
+  try {
+    const url = new URL(process.env.CONTROLLER_URL);
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) process.exit(1);
+  } catch { process.exit(1); }
+' || die 'Agent 管理地址必须是 HTTPS 根地址；请先检查 /etc/nexusgate/agent.env，再更新'
 command -v curl >/dev/null || die "缺少 curl"
 tmp_dir="$(mktemp -d /tmp/nexusgate-agent-update.XXXXXX)"
 trap 'rm -rf -- "$tmp_dir"' EXIT
