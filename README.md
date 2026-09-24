@@ -34,6 +34,9 @@ ng backup                         # 两个数据库和环境配置的迁移包
 ng restore /root/备份文件.tar.gz   # 恢复联合备份
 ng domain new.example.com         # 同步域名和 SubVault 公开链接
 ng cert                           # 检查 Caddy 证书
+ng sub-info                       # 查看独立订阅地址、服务与磁盘空间
+ng sub-logs                       # 查看独立订阅日志
+ng sub-compact                    # 联合备份后压缩订阅数据库
 ```
 
 恢复应在相同试验版完成安装的机器上进行。备份含管理员设置、令牌与节点凭据，文件默认 0600，请放在安全位置。原 NexusGate 旧版备份可以恢复，但没有 SubVault 数据；SubVault 旧项目数据库也不会自动迁移。更新只替换源代码和 systemd 单元，不重置两个数据目录。SubVault 的访问日志、上报明细和非活跃绑定会按它原有清理策略定期删除；Caddy 日志轮转由 NexusGate 安装器设置。面板 CPU 和内存随请求、节点规模以及日志量变化，安装器不承诺固定资源占用。
