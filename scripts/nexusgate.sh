@@ -152,6 +152,29 @@ certificate_status() {
   journalctl -u caddy -n 30 --no-pager
 }
 
+subvault_info() {
+  need_root
+  [[ -f /etc/nexusgate-subvault.env ]] || die '尚未安装独立订阅服务'
+  sed -n 's/^SUBVAULT_PUBLIC_URL=/独立订阅地址：/p' /etc/nexusgate-subvault.env
+  du -sh /var/lib/nexusgate-subvault
+  df -h /var/lib/nexusgate-subvault | head -n 2
+  systemctl status nexusgate-subvault --no-pager
+}
+
+subvault_compact() {
+  need_root
+  [[ -f /var/lib/nexusgate-subvault/subvault.db ]] || die '未找到独立订阅数据库'
+  backup "/root/nexusgate-before-sub-compact-$(date +%Y%m%d-%H%M%S).tar.gz"
+  systemctl stop nexusgate-subvault
+  # A stopped writer and a preceding combined backup make VACUUM safe.
+  if ! runuser -u nexusgate-subvault -- python3 -c 'import sqlite3; conn=sqlite3.connect("/var/lib/nexusgate-subvault/subvault.db"); conn.execute("VACUUM"); conn.close()'; then
+    systemctl start nexusgate-subvault
+    die '数据库压缩失败，服务已重新启动'
+  fi
+  systemctl start nexusgate-subvault
+  info '独立订阅数据库已压缩'
+}
+
 change_account() {
   need_root
   local current="${1:-}" next='' first='' second=''
@@ -213,9 +236,9 @@ menu() {
     4) backup ;;
     5) restore ;;
     6) change_account ;;
-    7) systemctl status nexusgate --no-pager ;;
+    7) systemctl status nexusgate --no-pager; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl status nexusgate-subvault --no-pager; fi ;;
     8) need_root; systemctl restart nexusgate caddy; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl restart nexusgate-subvault; fi; info '已重启' ;;
-    9) journalctl -u nexusgate -n 120 --no-pager ;;
+    9) journalctl -u nexusgate -u nexusgate-subvault -n 120 --no-pager ;;
     10) uninstall_panel ;;
     0) exit 0 ;;
     *) die '无效选择' ;;
@@ -223,9 +246,12 @@ menu() {
 }
 
 case "${1:-menu}" in
-  status) systemctl status nexusgate --no-pager ;;
+  status) systemctl status nexusgate --no-pager; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl status nexusgate-subvault --no-pager; fi ;;
   restart) need_root; systemctl restart nexusgate caddy; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl restart nexusgate-subvault; fi ;;
-  logs) journalctl -u nexusgate -n "${2:-120}" --no-pager ;;
+  logs) journalctl -u nexusgate -u nexusgate-subvault -n "${2:-120}" --no-pager ;;
+  sub-info) subvault_info ;;
+  sub-logs) journalctl -u nexusgate-subvault -n "${2:-120}" --no-pager ;;
+  sub-compact) subvault_compact ;;
   backup) backup "${2:-}" ;;
   restore) restore "${2:-}" ;;
   update) update_panel ;;
@@ -234,5 +260,5 @@ case "${1:-menu}" in
   account|password) change_account "${2:-}" ;;
   uninstall) uninstall_panel ;;
   menu|"") menu ;;
-  *) die "用法：nexusgate {status|restart|logs|backup|restore|update|domain|cert|account|uninstall|menu}" ;;
+  *) die "用法：nexusgate {status|restart|logs|sub-info|sub-logs|sub-compact|backup|restore|update|domain|cert|account|uninstall|menu}" ;;
 esac
