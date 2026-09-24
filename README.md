@@ -24,6 +24,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/NexusGate-Sub/main/
 
 如果 NexusGate 安装成功但 SubVault 步骤失败，修好错误后在新机执行 `bash /opt/nexusgate/scripts/subvault-install.sh`，保留已生成的后台密码与数据库。
 
+### 修复早期安装器的 Caddy 重复站点错误
+
+早期试验版把反代配置的备份写入 `/etc/caddy/Caddyfile.d/`，Caddy 的通配导入会把该备份当作第二个同域名站点。已安装的机器直接运行 `ng update`：更新器会把遗留备份移到 `/etc/caddy/nexusgate-backups/`，校验并重新加载反代配置，保留两个数据库。如果首次失败时没有收到 SubVault 密码，运行 `ng sub-reset-password` 生成新密码。不要重新运行仅用于新机器的联合安装命令。
+
 ## 运维
 
 ```bash
@@ -37,6 +41,7 @@ ng cert                           # 检查 Caddy 证书
 ng sub-info                       # 查看独立订阅地址、服务与磁盘空间
 ng sub-logs                       # 查看独立订阅日志
 ng sub-compact                    # 联合备份后压缩订阅数据库
+ng sub-reset-password             # 重置独立订阅密码并使旧会话失效
 ```
 
 恢复应在相同试验版完成安装的机器上进行。备份含管理员设置、令牌与节点凭据，文件默认 0600，请放在安全位置。原 NexusGate 旧版备份可以恢复，但没有 SubVault 数据；SubVault 旧项目数据库也不会自动迁移。更新只替换源代码和 systemd 单元，不重置两个数据目录。SubVault 的访问日志、上报明细和非活跃绑定会按它原有清理策略定期删除；Caddy 日志轮转由 NexusGate 安装器设置。面板 CPU 和内存随请求、节点规模以及日志量变化，安装器不承诺固定资源占用。

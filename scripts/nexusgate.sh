@@ -118,6 +118,11 @@ update_panel() {
     journalctl -u nexusgate-subvault -n 60 --no-pager || true
     die "独立订阅服务启动失败；请使用备份恢复"
   fi
+  if [[ -f /etc/nexusgate-subvault.env ]]; then
+    # Reconcile the shared Caddy site too. This repairs installations that
+    # previously stopped after the duplicate-site validation error.
+    bash /opt/nexusgate/scripts/subvault-install.sh
+  fi
   if [[ -f /etc/nexusgate/agent.env ]]; then
     info '检测到本机同时承载节点，更新本机 Agent'
     bash "$stage/source/scripts/agent-update.sh" || info 'Agent 更新失败；控制面仍可运行，请执行 ng-agent doctor 查看原因'
@@ -175,6 +180,33 @@ subvault_compact() {
   info '独立订阅数据库已压缩'
 }
 
+subvault_reset_password() {
+  need_root
+  [[ -f /etc/nexusgate-subvault.env && -f /var/lib/nexusgate-subvault/subvault.db ]] || die '尚未安装独立订阅服务'
+  backup "/root/nexusgate-before-sub-password-$(date +%Y%m%d-%H%M%S).tar.gz"
+  local next encoded username
+  next="$(openssl rand -base64 24 | tr -d '\n')"
+  encoded="$(printf %s "$next" | base64 -w0)"
+  username="$(runuser -u nexusgate-subvault -- env PYTHONPATH=/opt/nexusgate/subvault NG_SUB_NEW_PASSWORD="$next" python3 - <<'PY'
+import os
+import sqlite3
+from panel.security import hash_password
+path = "/var/lib/nexusgate-subvault/subvault.db"
+with sqlite3.connect(path) as conn:
+    admin = conn.execute("SELECT id, username FROM admins ORDER BY id LIMIT 1").fetchone()
+    if admin is None:
+        raise SystemExit("未找到管理员账户")
+    conn.execute("UPDATE admins SET password_hash=? WHERE id=?", (hash_password(os.environ["NG_SUB_NEW_PASSWORD"]), admin[0]))
+    conn.execute("DELETE FROM sessions")
+    print(admin[1])
+PY
+)"
+  sed -i "s|^SUBVAULT_ADMIN_PASSWORD_B64=.*$|SUBVAULT_ADMIN_PASSWORD_B64=${encoded}|" /etc/nexusgate-subvault.env
+  chmod 0600 /etc/nexusgate-subvault.env
+  info "独立订阅密码已重置；原有会话已退出"
+  printf '账号：%s\n新密码：%s\n请保存，不要粘贴到聊天或截图。\n' "$username" "$next"
+}
+
 change_account() {
   need_root
   local current="${1:-}" next='' first='' second=''
@@ -226,7 +258,7 @@ uninstall_panel() {
 
 menu() {
   printf '\nNexusGate 管理菜单\n'
-  printf '1. 一键升级\n2. 更换域名\n3. 检查证书\n4. 生成迁移备份\n5. 恢复迁移备份\n6. 修改管理员账号 / 密码\n7. 查看状态\n8. 重启服务\n9. 查看日志\n10. 卸载面板\n0. 退出\n'
+  printf '1. 一键升级\n2. 更换域名\n3. 检查证书\n4. 生成迁移备份\n5. 恢复迁移备份\n6. 修改 NexusGate 管理员账号 / 密码\n7. 查看状态\n8. 重启服务\n9. 查看日志\n10. 卸载面板\n11. 重置独立订阅密码\n0. 退出\n'
   local choice
   read -r -p '请选择：' choice </dev/tty
   case "$choice" in
@@ -240,6 +272,7 @@ menu() {
     8) need_root; systemctl restart nexusgate caddy; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl restart nexusgate-subvault; fi; info '已重启' ;;
     9) journalctl -u nexusgate -u nexusgate-subvault -n 120 --no-pager ;;
     10) uninstall_panel ;;
+    11) subvault_reset_password ;;
     0) exit 0 ;;
     *) die '无效选择' ;;
   esac
@@ -252,6 +285,7 @@ case "${1:-menu}" in
   sub-info) subvault_info ;;
   sub-logs) journalctl -u nexusgate-subvault -n "${2:-120}" --no-pager ;;
   sub-compact) subvault_compact ;;
+  sub-reset-password) subvault_reset_password ;;
   backup) backup "${2:-}" ;;
   restore) restore "${2:-}" ;;
   update) update_panel ;;
@@ -260,5 +294,5 @@ case "${1:-menu}" in
   account|password) change_account "${2:-}" ;;
   uninstall) uninstall_panel ;;
   menu|"") menu ;;
-  *) die "用法：nexusgate {status|restart|logs|sub-info|sub-logs|sub-compact|backup|restore|update|domain|cert|account|uninstall|menu}" ;;
+  *) die "用法：nexusgate {status|restart|logs|sub-info|sub-logs|sub-compact|sub-reset-password|backup|restore|update|domain|cert|account|uninstall|menu}" ;;
 esac

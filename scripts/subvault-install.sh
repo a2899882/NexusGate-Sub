@@ -9,8 +9,21 @@ config=/etc/caddy/Caddyfile.d/nexusgate.caddy
 domain="$(awk 'NF && $1 !~ /^#/ {print $1;exit}' "$config")"
 [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || { echo '无法从 Caddy 配置读取域名' >&2; exit 1; }
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get install -y -qq python3 openssl
+# The former installer left this backup inside Caddy's wildcard import.
+# Caddy then loaded the same site twice and rejected the configuration.
+backup_dir=/etc/caddy/nexusgate-backups
+install -d -m 0700 "$backup_dir"
+legacy_backup="${config}.before-subvault"
+if [[ -f "$legacy_backup" ]]; then
+  saved_legacy="$(mktemp "$backup_dir/legacy.XXXXXX")"
+  mv -- "$legacy_backup" "$saved_legacy"
+  echo "已将旧配置备份移出 Caddy 导入目录：$saved_legacy"
+fi
+
+if ! command -v python3 >/dev/null || ! command -v openssl >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y -qq python3 openssl
+fi
 if [[ ! -f /etc/nexusgate-subvault.env ]]; then
   python3 - <<'PY'
 import socket
@@ -56,7 +69,7 @@ curl -fsS http://127.0.0.1:8790/healthz >/dev/null || {
 }
 
 if ! grep -qF 'handle_path /vault/*' "$config"; then
-  backup="${config}.before-subvault"
+  backup="$(mktemp "$backup_dir/nexusgate.XXXXXX")"
   cp -a "$config" "$backup"
   python3 - "$config" <<'PY'
 from pathlib import Path
@@ -83,11 +96,17 @@ PY
     cp -a "$backup" "$config"
     echo 'Caddy 验证失败，已恢复原配置' >&2; exit 1
   fi
-  systemctl reload caddy
+  if ! systemctl reload caddy; then
+    cp -a "$backup" "$config"
+    systemctl reload caddy || true
+    echo 'Caddy 加载失败，已恢复原配置' >&2; exit 1
+  fi
+else
+  caddy validate --config /etc/caddy/Caddyfile
 fi
 printf '\n独立订阅地址：https://%s/vault/\n账号：admin\n' "$domain"
 if [[ -n "${password:-}" ]]; then
   printf '初始密码：%s\n请保存密码；后续运行不会再次显示。\n' "$password"
 else
-  printf '原有账号和数据已保留。\n'
+  printf '原有账号和数据已保留。若安装中断时没有记下 SubVault 密码，可运行 ng sub-reset-password。\n'
 fi
