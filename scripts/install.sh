@@ -80,13 +80,6 @@ ${DOMAIN} {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         -Server
     }
-    log {
-        output file /var/log/caddy/nexusgate-access.log {
-            roll_size 20MiB
-            roll_keep 5
-            roll_keep_for 168h
-        }
-    }
 EOF
 if [[ -n "$EMAIL" ]]; then printf '    tls %s\n' "$EMAIL" >> /etc/caddy/Caddyfile.d/nexusgate.caddy; fi
 printf '}\n' >> /etc/caddy/Caddyfile.d/nexusgate.caddy

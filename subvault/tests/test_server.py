@@ -24,6 +24,7 @@ class ServerTests(unittest.TestCase):
             SUBVAULT_ADMIN_PASSWORD="testing-password-123",
             SUBVAULT_PUBLIC_URL="http://127.0.0.1",
             SUBVAULT_COOKIE_SECURE="0",
+            SUBVAULT_AUTH_MODE="standalone",
             SUBVAULT_USAGE_REPORT_KEY="report-test-key",
         )
         self.app = App()
@@ -60,6 +61,22 @@ class ServerTests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(self.request("/healthz")["status"], "ok")
+
+    def test_account_name_and_password_change_revoke_old_session(self):
+        self.request("/api/change-account", "POST", {
+            "username": "new-owner", "current_password": "testing-password-123",
+            "new_password": "new-testing-password-123", "confirm_password": "new-testing-password-123",
+        })
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            self.request("/api/nodes")
+        self.assertEqual(denied.exception.code, 401)
+        with self.assertRaises(urllib.error.HTTPError) as old_login:
+            self.request("/api/login", "POST", {"username": "admin", "password": "testing-password-123"})
+        self.assertEqual(old_login.exception.code, 401)
+        new_login = self.request("/api/login", "POST", {
+            "username": "new-owner", "password": "new-testing-password-123",
+        })
+        self.assertEqual(new_login["username"], "new-owner")
 
     def test_existing_database_adds_subscription_group_column(self):
         path = os.path.join(self.temp.name, "legacy.db")

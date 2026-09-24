@@ -38,8 +38,6 @@ PY
   getent group nexusgate-subvault >/dev/null || groupadd --system nexusgate-subvault
   id nexusgate-subvault >/dev/null 2>&1 || useradd --system --gid nexusgate-subvault --home-dir /var/lib/nexusgate-subvault --shell /usr/sbin/nologin nexusgate-subvault
   install -d -o nexusgate-subvault -g nexusgate-subvault -m 0700 /var/lib/nexusgate-subvault
-  password="$(openssl rand -base64 24 | tr -d '\n')"
-  password_b64="$(printf %s "$password" | base64 -w0)"
   report_key="$(openssl rand -hex 32)"
   cat > /etc/nexusgate-subvault.env <<EOF
 SUBVAULT_HOST=127.0.0.1
@@ -48,7 +46,6 @@ SUBVAULT_DATA_DIR=/var/lib/nexusgate-subvault
 SUBVAULT_PUBLIC_URL=https://${domain}/vault
 SUBVAULT_COOKIE_SECURE=1
 SUBVAULT_ADMIN_USER=admin
-SUBVAULT_ADMIN_PASSWORD_B64=${password_b64}
 SUBVAULT_USAGE_REPORT_KEY=${report_key}
 EOF
   chmod 0600 /etc/nexusgate-subvault.env
@@ -56,9 +53,33 @@ else
   install -d -o nexusgate-subvault -g nexusgate-subvault -m 0700 /var/lib/nexusgate-subvault
 fi
 
+# Both services keep their own data stores, but administration uses the live
+# NexusGate session. The private bridge credential never reaches the browser.
+ng_key="$(sed -n 's/^NG_SUBVAULT_BRIDGE_KEY=//p' /etc/nexusgate.env | head -n 1)"
+sub_key="$(sed -n 's/^SUBVAULT_BRIDGE_KEY=//p' /etc/nexusgate-subvault.env | head -n 1)"
+if [[ -z "$ng_key" || "$ng_key" != "$sub_key" ]]; then
+  bridge_key="$(openssl rand -hex 32)"
+  sed -i '/^NG_SUBVAULT_BRIDGE_KEY=/d' /etc/nexusgate.env
+  printf 'NG_SUBVAULT_BRIDGE_KEY=%s\n' "$bridge_key" >> /etc/nexusgate.env
+else
+  bridge_key="$ng_key"
+fi
+sed -i '/^SUBVAULT_BRIDGE_KEY=/d; /^SUBVAULT_AUTH_MODE=/d; /^SUBVAULT_NG_PORT=/d; /^SUBVAULT_ADMIN_PASSWORD_B64=/d; /^SUBVAULT_ADMIN_PASSWORD=/d' /etc/nexusgate-subvault.env
+printf 'SUBVAULT_BRIDGE_KEY=%s\nSUBVAULT_AUTH_MODE=nexusgate\nSUBVAULT_NG_PORT=8787\n' "$bridge_key" >> /etc/nexusgate-subvault.env
+chmod 0600 /etc/nexusgate.env /etc/nexusgate-subvault.env
+systemctl restart nexusgate
+for _ in {1..30}; do
+  if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8787/healthz >/dev/null || {
+  echo 'NexusGate 启动失败，联合登录未启用' >&2; exit 1;
+}
+
 install -m 0644 /opt/nexusgate/systemd/nexusgate-subvault.service /etc/systemd/system/nexusgate-subvault.service
 systemctl daemon-reload
-systemctl enable --now nexusgate-subvault
+systemctl enable nexusgate-subvault
+systemctl restart nexusgate-subvault
 for _ in {1..30}; do
   if curl -fsS http://127.0.0.1:8790/healthz >/dev/null 2>&1; then break; fi
   sleep 1
@@ -68,17 +89,19 @@ curl -fsS http://127.0.0.1:8790/healthz >/dev/null || {
   echo 'SubVault 启动失败，原面板仍然可用' >&2; exit 1;
 }
 
-if ! grep -qF 'handle_path /vault/*' "$config"; then
-  backup="$(mktemp "$backup_dir/nexusgate.XXXXXX")"
-  cp -a "$config" "$backup"
-  python3 - "$config" <<'PY'
+backup="$(mktemp "$backup_dir/nexusgate.XXXXXX")"
+cp -a "$config" "$backup"
+changed="$(python3 - "$config" <<'PY'
 from pathlib import Path
+import re
 import sys
 path = Path(sys.argv[1])
 body = path.read_text()
-needle = "reverse_proxy 127.0.0.1:8787"
-assert body.count(needle) == 1, "无法安全改写 Caddy 配置"
-body = body.replace(needle, """handle /vault {
+original = body
+if "handle_path /vault/*" not in body:
+    needle = "reverse_proxy 127.0.0.1:8787"
+    assert body.count(needle) == 1, "无法安全改写 Caddy 配置"
+    body = body.replace(needle, """handle /vault {
         redir /vault/ 308
     }
     handle_path /vault/* {
@@ -89,8 +112,30 @@ body = body.replace(needle, """handle /vault {
     handle {
         reverse_proxy 127.0.0.1:8787
     }""", 1)
-path.write_text(body)
+lines = body.splitlines(keepends=True)
+kept = []
+index = 0
+while index < len(lines):
+    if re.fullmatch(r"\s*log\s*\{\s*", lines[index]):
+        end, depth = index, 0
+        while end < len(lines):
+            depth += lines[end].count("{") - lines[end].count("}")
+            end += 1
+            if depth == 0:
+                break
+        block = "".join(lines[index:end])
+        if depth == 0 and "output file /var/log/caddy/nexusgate-access.log" in block:
+            index = end
+            continue
+    kept.append(lines[index])
+    index += 1
+body = "".join(kept)
+if body != original:
+    path.write_text(body)
+print("changed" if body != original else "unchanged")
 PY
+)"
+if [[ "$changed" == changed ]]; then
   caddy fmt --overwrite "$config"
   if ! caddy validate --config /etc/caddy/Caddyfile; then
     cp -a "$backup" "$config"
@@ -101,12 +146,11 @@ PY
     systemctl reload caddy || true
     echo 'Caddy 加载失败，已恢复原配置' >&2; exit 1
   fi
+  # The old access log contains complete /vault/s/<token> URLs. The managed
+  # site no longer writes it, so discard its rotated copies after reload.
+  find /var/log/caddy -maxdepth 1 -type f -name 'nexusgate-access.log*' -delete 2>/dev/null || true
 else
+  rm -f -- "$backup"
   caddy validate --config /etc/caddy/Caddyfile
 fi
-printf '\n独立订阅地址：https://%s/vault/\n账号：admin\n' "$domain"
-if [[ -n "${password:-}" ]]; then
-  printf '初始密码：%s\n请保存密码；后续运行不会再次显示。\n' "$password"
-else
-  printf '原有账号和数据已保留。若安装中断时没有记下 SubVault 密码，可运行 ng sub-reset-password。\n'
-fi
+printf '\n订阅管理已接入 NexusGate： https://%s/\n只需使用 NexusGate 管理员登录。原有 SubVault 数据已保留。\n' "$domain"

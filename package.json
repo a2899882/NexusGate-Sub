@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
-    "check": "node --check server.js && node --check agent/agent.js && node --check public/app.js && node --check scripts/reset-password.js && bash -n scripts/*.sh"
+    "check": "node --check server.js && node --check agent/agent.js && node --check public/app.js && node --check subvault/static/app.js && node --check subvault/static/login.js && node --check scripts/reset-password.js && bash -n scripts/*.sh"
   },
   "license": "MIT"
 }

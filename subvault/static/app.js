@@ -1,7 +1,7 @@
 if (window.self !== window.top) document.documentElement.classList.add("embedded");
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: "", user: "", nodes: [], allNodes: [], subscriptions: [], templates: [] };
+const state = { csrf: "", user: "", authMode: "standalone", nodes: [], allNodes: [], subscriptions: [], templates: [] };
 const listState = {
   nodes: {q:"", group:"", status:"all", page:1, page_size:25},
   subscriptions: {q:"", group:"", status:"all", page:1, page_size:25},
@@ -31,14 +31,37 @@ async function api(path, options={}) {
   if (options.method && options.method !== "GET") headers["X-CSRF-Token"] = state.csrf;
   const response = await fetch(`/vault${path}`, {cache:"no-store", ...options, headers});
   const data = await response.json().catch(()=>({error:"响应格式无效"}));
-  if (response.status === 401) { location.replace(`/vault/${location.hash}`); throw new Error("登录已过期"); }
+  if (response.status === 401) {
+    if (state.authMode === "nexusgate") window.top.location.assign("/");
+    else location.reload();
+    throw new Error("登录已过期");
+  }
   if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
   return data;
 }
 
-function showApp(session) { state.csrf=session.csrf;state.user=session.username;$("#adminName").textContent=session.username;route(); }
+function showApp(session) {
+  state.csrf=session.csrf;state.user=session.username;state.authMode=session.auth_mode;
+  if(state.authMode==="nexusgate" && window.self===window.top) {
+    const section=(location.hash||"#dashboard").slice(1);
+    window.location.replace(`/#vault-${titles[section]?section:"dashboard"}`);
+    return;
+  }
+  $("#adminName").textContent=session.username;route();
+}
 
-$("#logoutBtn").addEventListener("click", async()=>{ try{await api("/api/logout",{method:"POST",body:"{}"});}catch{} state.csrf="";location.replace(`/vault/${location.hash}`); });
+$("#logoutBtn").addEventListener("click", async()=>{
+  try {
+    if (state.authMode === "nexusgate") {
+      const response=await fetch("/api/auth/logout", {method:"POST",headers:{"X-CSRF-Token":state.csrf}});
+      if(!response.ok)throw new Error("退出失败，请重试");
+      window.top.location.assign("/");
+    } else {
+      await api("/api/logout",{method:"POST",body:"{}"});
+      state.csrf=""; location.reload();
+    }
+  } catch (error) { showToast(error.message,true); }
+});
 $("#menuBtn").addEventListener("click",()=>$(".sidebar").classList.toggle("open"));
 $("#modalClose").addEventListener("click",closeModal);
 $("#modal").addEventListener("click",e=>{if(e.target===$("#modal"))closeModal();});
@@ -182,9 +205,13 @@ async function renderLogs(){
 async function renderSettings(){
   const s=await api("/api/settings");
   $("#content").innerHTML=`<section class="grid-two"><div class="panel"><div class="panel-head"><div><h3>运行信息</h3><p>当前实例配置</p></div>${badge(`v${s.version}`,"blue")}</div><div class="form-stack"><div><p class="eyebrow">PUBLIC URL</p><strong>${escapeHtml(s.public_url||"未设置")}</strong></div><div><p class="eyebrow">DATABASE + WAL</p><strong>${fmtBytes(s.database_bytes)}</strong></div><div><p class="eyebrow">磁盘空间</p><strong>可用 ${fmtBytes(s.disk_free_bytes)} / 共 ${fmtBytes(s.disk_total_bytes)}</strong></div><div><p class="eyebrow">自动清理</p><strong>访问日志 ${s.log_retention_days} 天 / 流量明细 ${s.usage_retention_days} 天</strong><p class="help">当前 ${s.access_log_rows.toLocaleString()} 条访问日志，${s.usage_report_rows.toLocaleString()} 条流量明细；每 ${Math.round(s.cleanup_interval_seconds/3600*10)/10} 小时检查一次。</p></div><div><p class="eyebrow">USAGE REPORTING</p>${badge(s.usage_reporting?"已配置":"未配置",s.usage_reporting?"ok":"warn")}</div><div><p class="eyebrow">PROTOCOLS</p><p>${s.supported_protocols.map(x=>badge(x.toUpperCase())).join(" ")}</p></div></div><div class="notice warning" style="margin-top:20px">真实流量限制需要节点按订阅 Token 上报用量；普通节点链接本身不具备用户级计量能力。</div></div>
-    <div class="panel"><div class="panel-head"><div><h3>修改管理员密码</h3><p>至少 10 个字符</p></div></div><form id="passwordForm" class="form-stack"><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label><button class="btn primary" type="submit">更新密码</button></form></div></section>
+    <div class="panel"><div class="panel-head"><div><h3>管理员账号</h3><p>${state.authMode==="nexusgate"?"统一使用 NexusGate 账号":"修改账号或密码后需要重新登录"}</p></div></div>${state.authMode==="nexusgate"?`<div class="form-stack"><p>此服务由 NexusGate 会话授权。请在 NexusGate 的“设置与运维”修改账号或密码；更改后这里会同步生效。</p><button class="btn primary" id="openGateSettings" type="button">前往账号设置</button></div>`:`<form id="accountForm" class="form-stack"><label>管理员账号<input name="username" value="${escapeHtml(state.user)}" autocomplete="username" minlength="3" maxlength="64" required></label><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码（留空不修改）<input name="new_password" type="password" autocomplete="new-password" minlength="10"></label><label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10"></label><button class="btn primary" type="submit">保存账号</button></form>`}</div></section>
     <section class="panel" style="margin-top:18px"><div class="panel-head"><div><h3>流量上报示例</h3><p>密钥从服务器 /etc/nexusgate-subvault.env 读取，不要放进公开仓库</p></div></div><div class="mono-card">curl -X POST '${escapeHtml(s.public_url)}/api/v1/usage' \\\n+  -H 'Authorization: Bearer YOUR_USAGE_REPORT_KEY' \\\n+  -H 'Content-Type: application/json' \\\n+  -d '{"subscription_token":"TOKEN","upload_bytes":1048576,"download_bytes":2097152,"source":"node-a"}'</div></section>`;
-  $("#passwordForm").addEventListener("submit",async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);try{await api("/api/change-password",{method:"POST",body:JSON.stringify(Object.fromEntries(fd))});e.currentTarget.reset();showToast("密码已更新");}catch(err){showToast(err.message,true);}});
+  if(state.authMode==="nexusgate") $("#openGateSettings").addEventListener("click",()=>{
+    if(window.self!==window.top) window.parent.postMessage({type:"nexusgate:navigate",page:"operations"},location.origin);
+    else window.location.assign("/");
+  });
+  else $("#accountForm").addEventListener("submit",async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);try{await api("/api/change-account",{method:"POST",body:JSON.stringify(Object.fromEntries(fd))});sessionStorage.setItem("subvault:last-username",String(fd.get("username")));location.reload();}catch(err){showToast(err.message,true);}});
 }
 
-(async function boot(){try{showApp(await api("/api/session"));}catch{location.replace(`/vault/${location.hash}`);}})();
+(async function boot(){try{showApp(await api("/api/session"));}catch{if(state.authMode==="nexusgate")window.top.location.assign("/");else location.reload();}})();

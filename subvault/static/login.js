@@ -1,4 +1,5 @@
 const $ = selector => document.querySelector(selector);
+try { $("#loginForm [name=username]").value = sessionStorage.getItem("subvault:last-username") || "admin"; } catch { /* Storage may be disabled. */ }
 
 function showToast(message) {
   const toast = $("#toast");
@@ -25,7 +26,7 @@ $("#loginForm").addEventListener("submit", async event => {
     const data = await response.json().catch(() => ({error: "服务暂时不可用"}));
     if (!response.ok) throw new Error(data.error || `登录失败 (${response.status})`);
     form.reset();
-    location.replace(`/vault/${location.hash}`);
+    location.reload();
   } catch (error) {
     showToast(error.message);
     button.disabled = false;

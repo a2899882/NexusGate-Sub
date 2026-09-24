@@ -76,7 +76,12 @@ restore() (
   if [[ -f "$stage/nexusgate.caddy" ]]; then cp -a "$stage/nexusgate.caddy" /etc/caddy/Caddyfile.d/nexusgate.caddy; fi
   systemctl start nexusgate
   if [[ "$restore_subvault" == true ]]; then systemctl start nexusgate-subvault; fi
-  systemctl reload caddy || true
+  if [[ -f /etc/nexusgate-subvault.env ]]; then
+    bash /opt/nexusgate/scripts/subvault-install.sh
+  else
+    caddy validate --config /etc/caddy/Caddyfile
+    systemctl reload caddy
+  fi
   info "恢复完成；恢复前快照：$safety"
 )
 
@@ -214,6 +219,9 @@ subvault_compact() {
 subvault_reset_password() {
   need_root
   [[ -f /etc/nexusgate-subvault.env && -f /var/lib/nexusgate-subvault/subvault.db ]] || die '尚未安装独立订阅服务'
+  if grep -q '^SUBVAULT_AUTH_MODE=nexusgate$' /etc/nexusgate-subvault.env; then
+    die '已启用 NexusGate 统一登录，请使用 ng account 修改管理员账号或密码'
+  fi
   backup "/root/nexusgate-before-sub-password-$(date +%Y%m%d-%H%M%S).tar.gz"
   local next encoded username
   next="$(openssl rand -base64 24 | tr -d '\n')"
@@ -289,7 +297,7 @@ uninstall_panel() {
 
 menu() {
   printf '\nNexusGate 管理菜单\n'
-  printf '1. 一键升级\n2. 更换域名\n3. 检查证书\n4. 生成迁移备份\n5. 恢复迁移备份\n6. 修改 NexusGate 管理员账号 / 密码\n7. 查看状态\n8. 重启服务\n9. 查看日志\n10. 卸载面板\n11. 重置独立订阅密码\n0. 退出\n'
+  printf '1. 一键升级\n2. 更换域名\n3. 检查证书\n4. 生成迁移备份\n5. 恢复迁移备份\n6. 修改统一管理员账号 / 密码\n7. 查看状态\n8. 重启服务\n9. 查看日志\n10. 卸载面板\n0. 退出\n'
   local choice
   read -r -p '请选择：' choice </dev/tty
   case "$choice" in
@@ -303,7 +311,6 @@ menu() {
     8) need_root; systemctl restart nexusgate caddy; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl restart nexusgate-subvault; fi; info '已重启' ;;
     9) journalctl -u nexusgate -u nexusgate-subvault -n 120 --no-pager ;;
     10) uninstall_panel ;;
-    11) subvault_reset_password ;;
     0) exit 0 ;;
     *) die '无效选择' ;;
   esac

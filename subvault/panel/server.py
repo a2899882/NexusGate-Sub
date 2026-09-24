@@ -1,5 +1,6 @@
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
@@ -87,6 +88,9 @@ class App:
         data_dir = Path(os.getenv("SUBVAULT_DATA_DIR", "/data"))
         data_dir.mkdir(parents=True, exist_ok=True)
         self.db = Database(str(data_dir / "subvault.db"))
+        self.auth_mode = os.getenv("SUBVAULT_AUTH_MODE", "standalone")
+        if self.auth_mode not in {"standalone", "nexusgate"}:
+            raise RuntimeError("SUBVAULT_AUTH_MODE 无效")
         admin_user = os.getenv("SUBVAULT_ADMIN_USER", "admin")
         admin_password = os.getenv("SUBVAULT_ADMIN_PASSWORD", "")
         if os.getenv("SUBVAULT_ADMIN_PASSWORD_B64"):
@@ -95,8 +99,13 @@ class App:
             except (ValueError, UnicodeDecodeError):
                 raise RuntimeError("SUBVAULT_ADMIN_PASSWORD_B64 格式无效")
         if not admin_password:
-            raise RuntimeError("必须设置 SUBVAULT_ADMIN_PASSWORD")
+            if self.auth_mode == "standalone":
+                raise RuntimeError("必须设置 SUBVAULT_ADMIN_PASSWORD")
+            admin_password = random_token(32)  # Only used if the old database has no administrator.
         self.db.initialize(admin_user, admin_password)
+        self.bridge_key = os.getenv("SUBVAULT_BRIDGE_KEY", "")
+        if self.auth_mode == "nexusgate" and not self.bridge_key:
+            raise RuntimeError("联合登录缺少桥接密钥")
         self.public_url = os.getenv("SUBVAULT_PUBLIC_URL", "").rstrip("/")
         self.secure_cookie = os.getenv("SUBVAULT_COOKIE_SECURE", "1") != "0"
         self.session_hours = max(1, int(os.getenv("SUBVAULT_SESSION_HOURS", "24")))
@@ -159,6 +168,12 @@ class Handler(BaseHTTPRequestHandler):
     app: App
 
     def log_message(self, fmt, *args):
+        if args:
+            request = re.sub(r"(/s/)[^/\s?]+", r"\1[REDACTED]", str(args[0]))
+            request = re.sub(r"(/api/qr)\?[^\s]+", r"\1?[REDACTED]", request)
+            if " /healthz " in request:
+                return
+            args = (request, *args[1:])
         print(f"{self.address_string()} - {fmt % args}")
 
     def do_GET(self):
@@ -185,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/healthz" and method == "GET":
                 return self.send_json({"status": "ok", "version": __version__})
             if path == "/api/login" and method == "POST":
+                if self.app.auth_mode == "nexusgate":
+                    raise HTTPError(404, "请从 NexusGate 登录")
                 return self.login()
             if path.startswith("/s/") and method == "GET":
                 return self.serve_subscription(path, query)
@@ -208,10 +225,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_api(self, method, path, query, session):
         if path == "/api/session" and method == "GET":
-            return self.send_json({"username": session["username"], "csrf": session["csrf_token"]})
+            return self.send_json({"username": session["username"], "csrf": session["csrf_token"], "auth_mode": self.app.auth_mode})
         if path == "/api/qr" and method == "GET":
             return self.serve_qr(query)
         if path == "/api/logout" and method == "POST":
+            if self.app.auth_mode == "nexusgate":
+                raise HTTPError(404, "请从 NexusGate 退出")
             return self.logout()
         if path == "/api/dashboard" and method == "GET":
             return self.dashboard()
@@ -263,7 +282,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings" and method == "GET":
             return self.settings()
         if path == "/api/change-password" and method == "POST":
+            if self.app.auth_mode == "nexusgate":
+                raise HTTPError(404, "请在 NexusGate 修改账号")
             return self.change_password(session)
+        if path == "/api/change-account" and method == "POST":
+            if self.app.auth_mode == "nexusgate":
+                raise HTTPError(404, "请在 NexusGate 修改账号")
+            return self.change_account(session)
         raise HTTPError(404, "接口不存在")
 
     def read_json(self):
@@ -334,7 +359,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(requested.read_bytes(), content_type, headers={"Cache-Control": cache})
 
     def serve_app_shell(self):
-        requested = STATIC_DIR / ("index.html" if self.session_or_none() else "login.html")
+        session = self.session_or_none()
+        if self.app.auth_mode == "nexusgate" and not session:
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.security_headers()
+            self.end_headers()
+            return
+        requested = STATIC_DIR / ("index.html" if session else "login.html")
         self.send_bytes(requested.read_bytes(), "text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
     def serve_qr(self, query):
@@ -357,6 +390,24 @@ class Handler(BaseHTTPRequestHandler):
         return {key: morsel.value for key, morsel in cookie.items()}
 
     def session_or_none(self):
+        if self.app.auth_mode == "nexusgate":
+            cookie = self.headers.get("Cookie", "")
+            if not cookie or len(cookie) > 8192:
+                return None
+            connection = http.client.HTTPConnection("127.0.0.1", env_int("SUBVAULT_NG_PORT", 8787, 1, 65535), timeout=2)
+            try:
+                connection.request("GET", "/api/internal/subvault/session", headers={
+                    "Cookie": cookie, "X-NG-Bridge-Key": self.app.bridge_key,
+                })
+                response = connection.getresponse()
+                data = json.loads(response.read(4096)) if response.status == 200 else {}
+                if data.get("authenticated") and data.get("username") and data.get("csrf"):
+                    return {"username": data["username"], "csrf_token": data["csrf"]}
+            except (OSError, ValueError, http.client.HTTPException):
+                return None
+            finally:
+                connection.close()
+            return None
         raw = self.cookies().get("subvault_session", "")
         if not raw:
             return None
@@ -848,6 +899,32 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("DELETE FROM sessions WHERE admin_id=? AND token_hash<>?", (admin["id"], session["token_hash"]))
             conn.commit()
         self.send_json({"ok": True})
+
+    def change_account(self, session):
+        data = self.read_json()
+        current = str(data.get("current_password", ""))
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("new_password", ""))
+        if password != str(data.get("confirm_password", "")):
+            raise HTTPError(400, "两次输入的新密码不一致")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+            raise HTTPError(400, "账号需为 3–64 位英文字母、数字、点、横线或下划线")
+        with self.app.db.connect() as conn:
+            admin = conn.execute("SELECT * FROM admins WHERE id=?", (session["admin_id"],)).fetchone()
+            if not admin or not verify_password(current, admin["password_hash"]):
+                raise HTTPError(400, "当前密码错误")
+            if username == admin["username"] and not password:
+                raise HTTPError(400, "账号和密码均未更改")
+            try:
+                encoded = hash_password(password) if password else admin["password_hash"]
+                conn.execute("UPDATE admins SET username=?,password_hash=? WHERE id=?", (username, encoded, admin["id"]))
+            except ValueError as exc:
+                raise HTTPError(400, str(exc))
+            except sqlite3.IntegrityError:
+                raise HTTPError(409, "账号已被使用")
+            conn.execute("DELETE FROM sessions WHERE admin_id=?", (admin["id"],))
+            conn.commit()
+        self.send_json({"ok": True}, headers={"Set-Cookie": "subvault_session=; Path=/vault; HttpOnly; SameSite=Strict; Max-Age=0"})
 
     def _subscription_precheck(self, row):
         if not row["enabled"]:

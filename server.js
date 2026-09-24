@@ -178,6 +178,17 @@ function findAgentByBearer(req) {
 }
 
 async function handleAuth(req, res, pathname) {
+  if (req.method === 'GET' && pathname === '/api/internal/subvault/session') {
+    const key = process.env.NG_SUBVAULT_BRIDGE_KEY || '';
+    const supplied = String(req.headers['x-ng-bridge-key'] || '');
+    const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+    const valid = key && supplied && supplied.length === key.length &&
+      crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(key));
+    if (!local || !valid) { sendError(res, 404, '页面不存在', 'not_found'); return true; }
+    const auth = currentAdmin(req);
+    sendJson(res, 200, auth ? { authenticated: true, username: auth.user.username, csrf: auth.session.csrf } : { authenticated: false });
+    return true;
+  }
   if (req.method === 'POST' && pathname === '/api/auth/login') {
     const ip = getIp(req);
     const record = loginAttempts.get(ip) || { count: 0, blockedUntil: 0 };

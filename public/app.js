@@ -69,6 +69,10 @@ function showApp() {
   $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
   $('#user-chip').textContent = `${state.session.user.username} · 管理员`;
 }
+function initialPage() {
+  const page = location.hash.slice(1);
+  return ['overview','servers','customers','chains','deployments','commands','operations','vault-dashboard','vault-subscriptions','vault-nodes','vault-templates','vault-logs','vault-settings'].includes(page) ? page : 'overview';
+}
 
 async function load(page = state.page) {
   try {
@@ -84,7 +88,7 @@ async function load(page = state.page) {
     } else if (page === 'deployments') {
       const [servers, customers, routes] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains')]);
       state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments;
-    } else if (page.startsWith('vault-')) { /* SubVault requests remain in its own session. */ }
+    } else if (page.startsWith('vault-')) { /* SubVault checks the NexusGate session on each management request. */ }
     else if (page === 'commands') { /* Command reference needs no API request. */ }
     else if (page === 'operations') {
       const [jobs, servers, overview] = await Promise.all([api('/api/jobs'), api('/api/servers'), api('/api/overview')]);
@@ -96,6 +100,7 @@ async function load(page = state.page) {
 
 function setPage(page) {
   state.page = page; state.search = ''; closeSidebar();
+  if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   $$('#nav button').forEach((button) => button.classList.toggle('active', button.dataset.page === page));
   const titles = { overview:'概览', servers:'服务器', customers:'客户与订阅', chains:'转发与节点', deployments:'部署与链接', commands:'安装与命令', operations:'设置与运维', 'vault-dashboard':'订阅概览', 'vault-subscriptions':'独立订阅', 'vault-nodes':'独立节点', 'vault-templates':'订阅模板', 'vault-logs':'订阅日志', 'vault-settings':'订阅设置' };
   $('#page-title').textContent = titles[page]; $('#breadcrumb').textContent = `NEXUSGATE / ${titles[page]}`;
@@ -261,7 +266,7 @@ function renderOperations() {
 
 function renderVault() {
   const section = state.page.slice('vault-'.length);
-  return `<div class="vault-intro notice">这里直接操作 SubVault；/vault/ 是同一服务的直达入口，数据相同，无需重复管理。独立订阅有自己的管理员、节点、额度和数据库，不会自动同步 NexusGate 的客户与线路。首次进入请用安装时生成的 SubVault 管理员密码登录。</div><iframe class="vault-frame" title="SubVault ${esc(section)}" src="/vault/#${esc(section)}"></iframe>`;
+  return `<div class="vault-intro notice">已使用 NexusGate 管理员会话进入独立订阅。节点、订阅和额度仍保存在独立数据库，不会与 NexusGate 客户及线路自动同步。</div><iframe class="vault-frame" title="SubVault ${esc(section)}" src="/vault/#${esc(section)}"></iframe>`;
 }
 
 function render() {
@@ -403,7 +408,7 @@ document.addEventListener('submit', async (event) => {
     if (form.id === 'login-form') {
       $('#login-error').textContent = '';
       state.session = await api('/api/auth/login', { method:'POST', body:JSON.stringify({ username:data.get('username'), password:data.get('password') }) });
-      showApp(); setPage('overview'); return;
+      showApp(); setPage(initialPage()); return;
     }
     if (form.id === 'server-form') {
       const resourceId = data.get('resourceId');
@@ -540,6 +545,10 @@ $('#menu-toggle').addEventListener('click', () => $('#app').classList.add('sideb
 $('#sidebar-scrim').addEventListener('click', closeSidebar);
 $('#refresh').addEventListener('click', () => load());
 $('#logout').addEventListener('click', async () => { try { await api('/api/auth/logout', { method:'POST', body:'{}' }); } finally { showLogin(); } });
+window.addEventListener('message', (event) => {
+  if (event.origin !== location.origin || event.source !== $('.vault-frame')?.contentWindow) return;
+  if (event.data?.type === 'nexusgate:navigate' && event.data.page === 'operations') setPage('operations');
+});
 
 (async function boot() {
   let preferred = 'light'; try { preferred = localStorage.getItem('nexusgate-theme') || 'light'; } catch { /* storage may be disabled */ }
@@ -547,7 +556,7 @@ $('#logout').addEventListener('click', async () => { try { await api('/api/auth/
   try {
     const session = await api('/api/session');
     if (!session.authenticated) return showLogin();
-    state.session = session; showApp(); await load('overview');
+    state.session = session; showApp(); setPage(initialPage());
   } catch { showLogin(); }
   setInterval(() => { if (state.session && document.visibilityState === 'visible' && !$('#modal').open) load(); }, 45000);
 })();
