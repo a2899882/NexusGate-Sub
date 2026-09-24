@@ -26,7 +26,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/NexusGate-Sub/main/
 
 ### 修复早期安装器的 Caddy 重复站点错误
 
-早期试验版把反代配置的备份写入 `/etc/caddy/Caddyfile.d/`，Caddy 的通配导入会把该备份当作第二个同域名站点。已安装的机器直接运行 `ng update`：更新器会把遗留备份移到 `/etc/caddy/nexusgate-backups/`，校验并重新加载反代配置，保留两个数据库。如果首次失败时没有收到 SubVault 密码，运行 `ng sub-reset-password` 生成新密码。不要重新运行仅用于新机器的联合安装命令。
+早期试验版把反代配置的备份写入 `/etc/caddy/Caddyfile.d/`，Caddy 的通配导入会把该备份当作第二个同域名站点。已安装的机器运行 `ng update && bash /opt/nexusgate/scripts/subvault-install.sh`：第一步取得新版安装器和联合备份，第二步把遗留备份移到 `/etc/caddy/nexusgate-backups/`，校验并重新加载反代配置，保留两个数据库。**第一次升级仍由旧版 `ng` 脚本执行，所以不能省略第二步；往后的升级会自动对账反代配置。** 如果首次失败时没有收到 SubVault 密码，运行 `ng sub-reset-password` 生成新密码。不要重新运行仅用于新机器的联合安装命令。
 
 ## 运维
 
