@@ -1,3 +1,4 @@
+if (window.self !== window.top) document.documentElement.classList.add("embedded");
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: "", user: "", nodes: [], allNodes: [], subscriptions: [], templates: [] };
