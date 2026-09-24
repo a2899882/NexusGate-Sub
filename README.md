@@ -10,7 +10,7 @@ NexusGate 中转与节点控制面 + SubVault 独立订阅管理，在一台新�
 | SubVault | `https://域名/vault/` | `127.0.0.1:8790` | `/var/lib/nexusgate-subvault`、独立管理员 | 手动节点、独立订阅、模板、访问控制与日志 |
 | Caddy | `80/443` | 公网 | 统一 TLS 证书与反代 | 一台机器只运行一份 Caddy |
 
-NexusGate 侧栏的“独立订阅”区域嵌入 SubVault；首次进入需要 SubVault 自己的账号。两套客户、流量额度和节点记录**不会自动同步**。SubVault 可以手动导入已有节点链接，但导入不等于接管 NexusGate 的节点凭据或计量。订阅下载限制无法替代节点侧用户隔离和双向流量上报。
+NexusGate 侧栏的“独立订阅”区域嵌入 SubVault；`/vault/` 只是同一套 SubVault 数据的直达入口，不必两处重复操作。日常可只打开 NexusGate，但首次进入仍需登录 SubVault 自己的账号。两套客户、流量额度和节点记录**不会自动同步**，所以 NexusGate 中新增客户或节点不会出现在独立订阅中。SubVault 可以手动导入已有节点链接，但导入不等于接管 NexusGate 的节点凭据或计量。订阅下载限制无法替代节点侧用户隔离和双向流量上报。
 
 ## 新 VPS 一键安装
 
@@ -43,6 +43,8 @@ ng sub-logs                       # 查看独立订阅日志
 ng sub-compact                    # 联合备份后压缩订阅数据库
 ng sub-reset-password             # 重置独立订阅密码并使旧会话失效
 ```
+
+若旧版 `ng sub-reset-password` 在打印新密码后报 `stage: unbound variable`，这是临时备份目录的清理钩子重复执行，密码已成功修改。升级此仓库后修复；请勿为了消除报错再次重置。需要直接运行新版管理脚本升级旧安装时，可使用 `bash <(curl -fsSL https://raw.githubusercontent.com/a2899882/NexusGate-Sub/main/scripts/nexusgate.sh) update`。升级完成后仍用 `ng` 即可。
 
 恢复应在相同试验版完成安装的机器上进行。备份含管理员设置、令牌与节点凭据，文件默认 0600，请放在安全位置。原 NexusGate 旧版备份可以恢复，但没有 SubVault 数据；SubVault 旧项目数据库也不会自动迁移。更新只替换源代码和 systemd 单元，不重置两个数据目录。SubVault 的访问日志、上报明细和非活跃绑定会按它原有清理策略定期删除；Caddy 日志轮转由 NexusGate 安装器设置。面板 CPU 和内存随请求、节点规模以及日志量变化，安装器不承诺固定资源占用。
 

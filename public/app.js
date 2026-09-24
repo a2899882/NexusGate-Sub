@@ -261,7 +261,7 @@ function renderOperations() {
 
 function renderVault() {
   const section = state.page.slice('vault-'.length);
-  return `<div class="vault-intro notice">独立订阅使用自己的账号、节点、额度和数据库。NexusGate 的客户与线路保持原样。首次进入请用安装时生成的 SubVault 管理员密码登录。</div><iframe class="vault-frame" title="SubVault ${esc(section)}" src="/vault/#${esc(section)}"></iframe>`;
+  return `<div class="vault-intro notice">这里直接操作 SubVault；/vault/ 是同一服务的直达入口，数据相同，无需重复管理。独立订阅有自己的管理员、节点、额度和数据库，不会自动同步 NexusGate 的客户与线路。首次进入请用安装时生成的 SubVault 管理员密码登录。</div><iframe class="vault-frame" title="SubVault ${esc(section)}" src="/vault/#${esc(section)}"></iframe>`;
 }
 
 function render() {

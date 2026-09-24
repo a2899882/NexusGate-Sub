@@ -8,12 +8,12 @@ die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 info() { printf '\033[1;36m[NexusGate]\033[0m %s\n' "$*"; }
 need_root() { [[ "${EUID}" -eq 0 ]] || die "请使用 root 运行"; }
 
-backup() {
+backup() (
   need_root
   local output="${1:-/root/nexusgate-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
   local stage
   stage="$(mktemp -d /tmp/nexusgate-backup.XXXXXX)"
-  trap 'rm -rf -- "$stage"' RETURN
+  trap 'rm -rf -- "$stage"' EXIT
   cp -a /var/lib/nexusgate "$stage/data"
   cp -a /etc/nexusgate.env "$stage/nexusgate.env"
   if [[ -f /var/lib/nexusgate-subvault/subvault.db && -f /etc/nexusgate-subvault.env ]]; then
@@ -39,9 +39,9 @@ PY
   tar -czf "$output" -C "$stage" .
   chmod 0600 "$output"
   info "备份已生成：$output"
-}
+)
 
-restore() {
+restore() (
   need_root
   local archive="${1:-}"
   if [[ -z "$archive" ]]; then archive="$(find /root -maxdepth 1 -type f -name 'nexusgate-backup-*.tar.gz' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"; fi
@@ -49,7 +49,7 @@ restore() {
   if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "备份包包含不安全路径"; fi
   local stage safety
   stage="$(mktemp -d /tmp/nexusgate-restore.XXXXXX)"
-  trap 'rm -rf -- "$stage"' RETURN
+  trap 'rm -rf -- "$stage"' EXIT
   tar -xzf "$archive" -C "$stage"
   [[ -f "$stage/data/nexusgate.json" && -f "$stage/nexusgate.env" ]] || die "备份包不完整"
   safety="/root/nexusgate-before-restore-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -78,16 +78,16 @@ restore() {
   if [[ "$restore_subvault" == true ]]; then systemctl start nexusgate-subvault; fi
   systemctl reload caddy || true
   info "恢复完成；恢复前快照：$safety"
-}
+)
 
-update_panel() {
+update_panel() (
   need_root
   local stage current_backup old_backup
   local -a old_backups=()
   current_backup="/root/nexusgate-before-update-$(date +%Y%m%d-%H%M%S).tar.gz"
   backup "$current_backup"
   stage="$(mktemp -d /tmp/nexusgate-update.XXXXXX)"
-  trap 'rm -rf -- "$stage"' RETURN
+  trap 'rm -rf -- "$stage"' EXIT
   curl -fL --retry 3 "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" -o "$stage/source.tgz"
   mkdir -p "$stage/source" && tar -xzf "$stage/source.tgz" -C "$stage/source" --strip-components=1
   [[ -f "$stage/source/server.js" ]] || die "更新包不完整"
@@ -114,9 +114,16 @@ update_panel() {
     journalctl -u nexusgate -n 100 --no-pager || true
     die "更新后控制面启动失败；可使用上方备份恢复"
   fi
-  if [[ -f /etc/nexusgate-subvault.env ]] && ! curl -fsS http://127.0.0.1:8790/healthz >/dev/null; then
-    journalctl -u nexusgate-subvault -n 60 --no-pager || true
-    die "独立订阅服务启动失败；请使用备份恢复"
+  if [[ -f /etc/nexusgate-subvault.env ]]; then
+    healthy=false
+    for _ in {1..30}; do
+      if curl -fsS http://127.0.0.1:8790/healthz >/dev/null 2>&1; then healthy=true; break; fi
+      sleep 1
+    done
+    if [[ "$healthy" != true ]]; then
+      journalctl -u nexusgate-subvault -n 60 --no-pager || true
+      die "独立订阅服务启动失败；请使用备份恢复"
+    fi
   fi
   if [[ -f /etc/nexusgate-subvault.env ]]; then
     # Reconcile the shared Caddy site too. This repairs installations that
@@ -132,22 +139,46 @@ update_panel() {
   mapfile -t old_backups < <(find /root -maxdepth 1 -type f -name 'nexusgate-before-update-*.tar.gz' -printf '%T@ %p\n' | sort -nr | sed -n '6,$p' | cut -d' ' -f2-)
   for old_backup in "${old_backups[@]}"; do rm -f -- "$old_backup"; done
   info "更新完成；更新前备份：$current_backup"
-}
+)
 
-change_domain() {
+change_domain() (
   need_root
-  local domain="${1:-}"
+  local domain="${1:-}" config=/etc/caddy/Caddyfile.d/nexusgate.caddy
+  local stage previous_env=false committed=false
   if [[ -z "$domain" && -r /dev/tty ]]; then read -r -p '新域名：' domain </dev/tty; fi
   [[ "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || die "域名格式不正确"
-  sed -i -E "1s/^[^ ]+/${domain}/" /etc/caddy/Caddyfile.d/nexusgate.caddy
+  stage="$(mktemp -d /tmp/nexusgate-domain.XXXXXX)"
+  cp -a "$config" "$stage/nexusgate.caddy"
   if [[ -f /etc/nexusgate-subvault.env ]]; then
-    sed -i -E "s|^SUBVAULT_PUBLIC_URL=.*$|SUBVAULT_PUBLIC_URL=https://${domain}/vault|" /etc/nexusgate-subvault.env
-    systemctl restart nexusgate-subvault
+    cp -a /etc/nexusgate-subvault.env "$stage/subvault.env"
+    previous_env=true
   fi
-  caddy fmt --overwrite /etc/caddy/Caddyfile.d/nexusgate.caddy
-  caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+  # A failed validation, reload or SubVault restart must leave both services
+  # pointing at their previous domain. Keep snapshots outside Caddy's imports.
+  trap '
+    if [[ "$committed" != true ]]; then
+      cp -a "$stage/nexusgate.caddy" "$config"
+      if [[ "$previous_env" == true ]]; then
+        cp -a "$stage/subvault.env" /etc/nexusgate-subvault.env
+      fi
+      systemctl reload caddy >/dev/null 2>&1 || true
+      if [[ "$previous_env" == true ]]; then
+        systemctl restart nexusgate-subvault >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -rf -- "$stage"
+  ' EXIT
+  sed -i -E "1s/^[^ ]+/${domain}/" "$config"
+  if [[ "$previous_env" == true ]]; then
+    sed -i -E "s|^SUBVAULT_PUBLIC_URL=.*$|SUBVAULT_PUBLIC_URL=https://${domain}/vault|" /etc/nexusgate-subvault.env
+  fi
+  caddy fmt --overwrite "$config"
+  caddy validate --config /etc/caddy/Caddyfile
+  systemctl reload caddy
+  if [[ "$previous_env" == true ]]; then systemctl restart nexusgate-subvault; fi
+  committed=true
   info "域名已更新为 https://${domain}"
-}
+)
 
 certificate_status() {
   need_root
@@ -278,6 +309,7 @@ menu() {
   esac
 }
 
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 case "${1:-menu}" in
   status) systemctl status nexusgate --no-pager; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl status nexusgate-subvault --no-pager; fi ;;
   restart) need_root; systemctl restart nexusgate caddy; if [[ -f /etc/nexusgate-subvault.env ]]; then systemctl restart nexusgate-subvault; fi ;;
@@ -296,3 +328,4 @@ case "${1:-menu}" in
   menu|"") menu ;;
   *) die "用法：nexusgate {status|restart|logs|sub-info|sub-logs|sub-compact|sub-reset-password|backup|restore|update|domain|cert|account|uninstall|menu}" ;;
 esac
+fi
