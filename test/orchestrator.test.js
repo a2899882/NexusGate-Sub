@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Orchestrator } = require('../lib/orchestrator');
+const { Orchestrator, expireJobLeases } = require('../lib/orchestrator');
 
 test('an expired customer cannot queue a deployment before maintenance suspends the account', async () => {
   const data = {
@@ -16,4 +16,20 @@ test('an expired customer cannot queue a deployment before maintenance suspends 
   await assert.rejects(orchestrator.deployChain('chain'), /到期/);
   assert.equal(data.deployments.length, 0);
   assert.equal(data.jobs.length, 0);
+});
+
+test('lost diagnostic jobs expire without marking a healthy deployment failed', () => {
+  const now = Date.now();
+  const data = {
+    jobs:[{ id:'probe', action:'probe_hop', status:'running', attempts:3, deploymentId:'entry',
+      leaseUntil:new Date(now - 1000).toISOString() }],
+    deployments:[{ id:'entry', chainId:'chain', status:'active' }], chains:[{ id:'chain', status:'active' }]
+  };
+  assert.equal(expireJobLeases(data, now), true);
+  assert.equal(data.jobs[0].status, 'failed');
+  assert.equal(data.deployments[0].status, 'active');
+  assert.equal(data.chains[0].status, 'active');
+  data.jobs.push({ id:'queued', action:'probe_hop', status:'queued', createdAt:new Date(now - 6 * 60000).toISOString() });
+  assert.equal(expireJobLeases(data, now), true);
+  assert.equal(data.jobs[1].status, 'failed');
 });

@@ -8,7 +8,7 @@ const { Store } = require('./lib/store');
 const { hashSecret, verifySecret, randomToken, SessionManager } = require('./lib/auth');
 const { sendJson, sendError, readJson, route, serveStatic } = require('./lib/http');
 const { PROFILE_CATALOG, REALITY_PRESETS, validateEntryProtocol, validateProtocolPair, isRealityProtocol } = require('./lib/protocols');
-const { Orchestrator, audit, id, nowIso, suspendCustomerResources, resumeCustomerResources } = require('./lib/orchestrator');
+const { Orchestrator, audit, id, nowIso, suspendCustomerResources, resumeCustomerResources, expireJobLeases } = require('./lib/orchestrator');
 const { formatSubscription } = require('./lib/subscriptions');
 const { redactSecrets } = require('./lib/redact');
 const { clientIdentity, activeClients, observedIps, pruneAccess } = require('./lib/access');
@@ -962,20 +962,7 @@ async function housekeeping() {
           server.status = 'offline'; changed = true;
         }
       }
-      for (const job of data.jobs.filter((item) => item.status === 'running' && item.leaseUntil && new Date(item.leaseUntil).getTime() <= now)) {
-        changed = true;
-        job.leaseUntil = null; job.updatedAt = nowIso();
-        if (Number(job.attempts || 0) < 3) { job.status = 'queued'; job.error = 'Agent 未在租约内确认，任务已自动重试'; }
-        else {
-          job.status = 'failed'; job.error = 'Agent 连续 3 次未在租约内确认';
-          const deployment = data.deployments.find((item) => item.id === job.deploymentId);
-          if (deployment) {
-            deployment.status = 'failed'; deployment.error = job.error; deployment.updatedAt = nowIso();
-            const chain = data.chains.find((item) => item.id === deployment.chainId);
-            if (chain) { chain.status = 'degraded'; chain.updatedAt = nowIso(); }
-          }
-        }
-      }
+      if (expireJobLeases(data, now)) changed = true;
       for (const customer of data.customers) {
         const expired = customer.expiresAt && new Date(customer.expiresAt).getTime() <= now;
         const exhausted = customer.trafficLimitBytes > 0 && customer.usedBytes >= customer.trafficLimitBytes;
