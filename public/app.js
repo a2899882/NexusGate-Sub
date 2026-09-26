@@ -2,7 +2,8 @@
 
 const state = {
   session: null, page: 'overview', overview: null, servers: [], customers: [],
-  chains: [], deployments: [], jobs: [], probes: [], protocols: [], realityPresets: [], search: '', version: '0.6.9'
+  chains: [], deployments: [], jobs: [], probes: [], protocols: [], realityPresets: [], search: '',
+  chainFilter: 'all', selectedChains: new Set(), chainPage: 0, version: '0.6.10'
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -74,7 +75,7 @@ function initialPage() {
   return ['overview','servers','customers','chains','deployments','commands','operations','vault-dashboard','vault-subscriptions','vault-nodes','vault-templates','vault-logs','vault-settings'].includes(page) ? page : 'overview';
 }
 
-async function load(page = state.page) {
+async function load(page = state.page, silent = false) {
   try {
     if (page === 'overview') {
       const [overview, servers, customers, routes] = await Promise.all([api('/api/overview'), api('/api/servers'), api('/api/customers'), api('/api/chains')]);
@@ -82,9 +83,9 @@ async function load(page = state.page) {
     } else if (page === 'servers') state.servers = (await api('/api/servers')).servers;
     else if (page === 'customers') state.customers = (await api('/api/customers')).customers;
     else if (page === 'chains') {
-      const [servers, customers, routes, protocols] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains'), api('/api/protocols')]);
+      const [servers, customers, routes, protocols] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains'), state.protocols.length ? null : api('/api/protocols')]);
       state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments; state.probes = routes.probes || [];
-      state.protocols = protocols.profiles; state.realityPresets = protocols.realityPresets || [];
+      if (protocols) { state.protocols = protocols.profiles; state.realityPresets = protocols.realityPresets || []; }
     } else if (page === 'deployments') {
       const [servers, customers, routes] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains')]);
       state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments; state.probes = routes.probes || [];
@@ -94,23 +95,44 @@ async function load(page = state.page) {
       const [jobs, servers, overview] = await Promise.all([api('/api/jobs'), api('/api/servers'), api('/api/overview')]);
       state.jobs = jobs.jobs; state.servers = servers.servers; state.overview = overview; state.version = overview.version || state.version;
     }
-    render();
-    scheduleProbeRefresh();
-  } catch (error) { toast(error.message, true); }
+    if (page === 'chains') for (const id of state.selectedChains) {
+      const chain = state.chains.find((item) => item.id === id);
+      if (!chain || (chain.topology || 'forward') === 'direct' || !['active','partially_suspended'].includes(chain.status)) state.selectedChains.delete(id);
+    }
+    if (page === state.page) render();
+  } catch (error) { if (!silent) toast(error.message, true); }
 }
 
-let probeRefresh = null;
-function scheduleProbeRefresh() {
-  if (state.page !== 'chains' || !state.probes.some((item) => ['queued','running'].includes(item.status)) || probeRefresh) return;
-  probeRefresh = setTimeout(() => {
-    probeRefresh = null;
-    if (state.page === 'chains' && state.session && document.visibilityState === 'visible' && !$('#modal').open) load('chains');
-    else if (state.page === 'chains' && state.session) scheduleProbeRefresh();
-  }, 4000);
+let liveLoading = false;
+let fastRefreshUntil = 0;
+function liveProjection() {
+  const projection = {
+    servers:state.servers.map((item) => ({ id:item.id, status:item.status, lastSeenAt:item.lastSeenAt,
+      version:item.agentVersion || null, usageAt:item.usage?.lastReportAt || null, engineStatus:item.engine?.status || null })),
+    chains:state.chains.map((item) => ({ id:item.id, status:item.status, generation:item.generation, updatedAt:item.updatedAt, lastError:item.lastError || null })),
+    deployments:state.deployments.map((item) => ({ id:item.id, status:item.status, updatedAt:item.updatedAt, error:item.error || null })),
+    probes:state.probes
+  };
+  return state.page === 'servers' ? { servers:projection.servers } : projection;
+}
+function watchProgress() { fastRefreshUntil = Date.now() + 120000; }
+async function refreshLive() {
+  if (liveLoading || !state.session || document.visibilityState !== 'visible' ||
+      !['servers','chains','deployments'].includes(state.page) || $('#modal').open ||
+      document.activeElement?.matches('input:not([data-search]):not([data-chain-search]), select, textarea')) return;
+  liveLoading = true;
+  try {
+    const page = state.page;
+    const live = await api('/api/live');
+    if (page !== state.page) return;
+    const signature = JSON.stringify(page === 'servers' ? { servers:live.servers } : live);
+    if (JSON.stringify(liveProjection()) !== signature) await load(page, true);
+  } catch { /* the next poll retries; manual refresh remains available */ }
+  finally { liveLoading = false; }
 }
 
 function setPage(page) {
-  state.page = page; state.search = ''; closeSidebar();
+  state.page = page; state.search = ''; state.chainFilter = 'all'; state.chainPage = 0; state.selectedChains.clear(); closeSidebar();
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   $$('#nav button').forEach((button) => button.classList.toggle('active', button.dataset.page === page));
   const titles = { overview:'概览', servers:'服务器', customers:'客户与订阅', chains:'转发与节点', deployments:'部署与链接', commands:'安装与命令', operations:'设置与运维', 'vault-dashboard':'订阅概览', 'vault-subscriptions':'独立订阅', 'vault-nodes':'独立节点', 'vault-templates':'订阅模板', 'vault-logs':'订阅日志', 'vault-settings':'订阅设置' };
@@ -161,7 +183,7 @@ function renderServers() {
     return `<tr><td><strong>${esc(server.name)}</strong><small>${esc(server.publicAddress)}${server.publicAddressV6 ? ` · ${esc(server.publicAddressV6)}` : ''}</small></td>
       <td>${esc(roleText[server.role] || server.role)}<small>${esc(server.region || '未分组')} · ${tags(server.labels)}</small></td>
       <td><div class="server-summary">${status(server.status)}<span>Agent ${esc(server.agentVersion || '未上报')}</span><span>${server.lastSeenAt ? `上报 ${fmtDate(server.lastSeenAt)}` : '等待注册'}</span>${issues.length ? `<span class="error-detail" title="${esc(issues.join('；'))}">⚠ ${issues.length} 项异常</span>` : ''}</div>
-      <details class="server-details"><summary>证书、流量与资源详情</summary><div class="server-facts">${facts.map((fact) => `<span>${fact}</span>`).join('')}${issues.map((issue) => `<span class="error-detail">${issue}</span>`).join('')}</div></details></td>
+      <details class="server-details" data-server-details="${esc(server.id)}"><summary>证书、流量与资源详情</summary><div class="server-facts">${facts.map((fact) => `<span>${fact}</span>`).join('')}${issues.map((issue) => `<span class="error-detail">${issue}</span>`).join('')}</div></details></td>
       <td>${rowActions(server.id, `<button data-action="edit-server" data-id="${esc(server.id)}">编辑</button><button data-action="enroll-server" data-id="${esc(server.id)}">注册</button>`, [
         ['agent-uninstall','SSH 卸载'], ...(server.pendingCleanup ? [['retry-cleanup','重试清理']] : []),
         server.pendingCleanup && server.status !== 'online' ? ['forget-server','遗忘离线设备'] : ['delete-server','删除设备']
@@ -209,8 +231,25 @@ function compactChainActions(chain) {
   return more.length ? rowActions(chain.id, primary, more) : `<div class="actions compact-actions">${primary}</div>`;
 }
 
+function visibleChains() {
+  const q = state.search.trim().toLowerCase();
+  return state.chains.filter((chain) => {
+    if (state.chainFilter !== 'all' && (state.chainFilter === 'untested' ?
+      (chain.topology || 'forward') === 'direct' || state.probes.some((probe) => probe.chainId === chain.id) : state.chainFilter === 'failed' ?
+      !state.probes.some((probe) => probe.chainId === chain.id && (probe.status === 'failed' || (probe.status === 'completed' && !probe.probe?.reachable))) :
+      chain.status !== state.chainFilter)) return false;
+    return !q || [chain.name, chain.status, names(chain.relayServerIds, state.servers), names(chain.customerIds, state.customers),
+      (state.servers.find((item) => item.id === chain.exitServerId) || {}).name].join(' ').toLowerCase().includes(q);
+  });
+}
+
 function renderChains() {
-  const rows = state.chains.map((chain) => {
+  const filtered = visibleChains();
+  const pages = Math.max(1, Math.ceil(filtered.length / 25));
+  state.chainPage = Math.min(state.chainPage, pages - 1);
+  const shown = filtered.slice(state.chainPage * 25, (state.chainPage + 1) * 25);
+  const selectable = shown.filter((chain) => (chain.topology || 'forward') !== 'direct' && ['active','partially_suspended'].includes(chain.status));
+  const rows = shown.map((chain) => {
     const direct = (chain.topology || 'forward') === 'direct';
     const path = direct ? protocolName(chain.relayProtocol, 'relay-ingress') : `${protocolName(chain.relayProtocol, 'relay-ingress')} → ${protocolName(chain.exitProtocol, 'exit-transport')}`;
     const exit = direct ? '本机直出' : ((state.servers.find((item) => item.id === chain.exitServerId) || {}).name || '已删除');
@@ -220,15 +259,26 @@ function renderChains() {
     const waiting = probes.filter((item) => ['queued','running'].includes(item.status)).length;
     const passed = probes.filter((item) => item.status === 'completed' && item.probe?.reachable).length;
     const failed = probes.filter((item) => item.status === 'failed' || (item.status === 'completed' && !item.probe?.reachable)).length;
-    const summary = waiting ? `测试中 ${waiting} 台` : probes.length ? `可连 ${passed} · 不通 ${failed}` : '尚未测试';
+    const latencies = probes.filter((item) => item.status === 'completed' && item.probe?.reachable && Number.isFinite(Number(item.probe.latencyMs))).map((item) => Number(item.probe.latencyMs));
+    const range = latencies.length ? (latencies.length === 1 ? `${latencies[0]} ms` : `${Math.min(...latencies)}–${Math.max(...latencies)} ms`) : '';
+    const summary = waiting ? `测试中 ${waiting} 台${passed ? ` · ${range}` : ''}` : probes.length ?
+      `${passed}/${chain.relayServerIds.length} 可连${range ? ` · ${range}` : ''}${failed ? ` · ${failed} 不通` : ''}` : '尚未测试';
     const latest = probes.reduce((at, item) => !at || item.at > at ? item.at : at, null);
-    return `<tr><td><strong>${esc(chain.name)}</strong><small>${esc(topologyText[chain.topology || 'forward'])} · ${esc(path)}</small>${drift ? '<small class="error-detail">编辑的协议尚未应用，当前节点见“部署与链接”</small>' : ''}</td>
+    const details = chain.relayServerIds.map((serverId) => {
+      const item = probes.find((probe) => probe.serverId === serverId);
+      const server = state.servers.find((entry) => entry.id === serverId);
+      const outcome = !item ? '未测试' : item.status === 'completed' ? item.probe?.reachable ? `${Number(item.probe.latencyMs)} ms` : (item.probe?.reason || '连接失败') :
+        item.status === 'failed' ? (item.error || '测试失败') : (statusText[item.status] || item.status);
+      return `<span class="hop-result${item && (item.status === 'failed' || (item.status === 'completed' && !item.probe?.reachable)) ? ' error-detail' : ''}" title="${esc(outcome)}">${esc(server?.name || '已删除设备')}：${esc(outcome)}</span>`;
+    }).join('');
+    return `<tr><td><input type="checkbox" data-chain-select value="${esc(chain.id)}" aria-label="选择线路 ${esc(chain.name)}"${state.selectedChains.has(chain.id) ? ' checked' : ''}${direct || !['active','partially_suspended'].includes(chain.status) || (state.selectedChains.size >= 25 && !state.selectedChains.has(chain.id)) ? ' disabled' : ''}><strong>${esc(chain.name)}</strong><small>${esc(topologyText[chain.topology || 'forward'])} · ${esc(path)}</small>${drift ? '<small class="error-detail">编辑的协议尚未应用，当前节点见“部署与链接”</small>' : ''}</td>
       <td>${esc(names(chain.relayServerIds, state.servers))}<small>${esc(chain.networkMode || 'ipv4').toUpperCase()}</small></td><td>${esc(exit)}</td>
       <td>${esc(names(chain.customerIds, state.customers))}</td><td>${status(chain.status)}${chain.lastError ? `<small class="error-detail" title="${esc(chain.lastError)}">${esc(chain.lastError)}</small>` : ''}</td>
-      <td>${direct ? '<span class="muted">本机直连</span>' : `<div class="hop-diagnostic"><b class="${failed ? 'error-detail' : ''}">${esc(summary)}</b>${latest ? `<small>${fmtDate(latest)}</small>` : ''}<div class="actions"><button data-action="probe-chain" data-id="${esc(chain.id)}"${waiting || !['active','partially_suspended'].includes(chain.status) ? ' disabled' : ''}>测试互通</button>${probes.length ? `<button data-action="probe-detail" data-id="${esc(chain.id)}">详情</button>` : ''}</div></div>`}</td><td>${compactChainActions(chain)}</td></tr>`;
+      <td>${direct ? '<span class="muted">本机直连</span>' : `<div class="hop-diagnostic"><b class="${failed ? 'error-detail' : ''}">${esc(summary)}</b>${latest ? `<small>${fmtDate(latest)}</small>` : ''}${chain.relayServerIds.length <= 2 ? `<div class="hop-results">${details}</div>` : probes.length ? `<details class="hop-more" data-hop-more="${esc(chain.id)}"><summary>查看各入口结果</summary><div class="hop-results">${details}</div></details>` : ''}<div class="actions"><button data-action="probe-chain" data-id="${esc(chain.id)}"${waiting || !['active','partially_suspended'].includes(chain.status) ? ' disabled' : ''}>测试互通</button>${probes.length ? `<button data-action="probe-detail" data-id="${esc(chain.id)}">详情</button>` : ''}</div></div>`}</td><td>${compactChainActions(chain)}</td></tr>`;
   }).join('');
-  return `<div class="page-intro"><p>转发线路部署后可按需测试入口到出口的 TCP 建连时间。结果包含 DNS 与建连，不能证明协议认证、客户端可用性或端到端速度；每条线路 60 秒内最多测试一次。</p><button class="primary" data-action="add-chain">＋ 新建线路</button></div>
-    <section class="panel"><div class="table-wrap"><table><thead><tr><th>线路</th><th>入口 / 节点设备</th><th>出口</th><th>客户</th><th>状态</th><th>互通诊断</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty('还没有线路','准备好设备和客户后创建第一条线路')}</td></tr>`}</tbody></table></div></section>`;
+  return `<div class="page-intro"><p>按需测试入口到出口的 TCP 建连时间（含 DNS）。这不代表协议认证、客户端可用性或速度；每条线路 60 秒内最多测试一次。</p><button class="primary" data-action="add-chain">＋ 新建线路</button></div>
+    <section class="panel"><div class="panel-head chain-toolbar"><div class="toolbar"><input class="search" type="search" data-chain-search placeholder="搜索线路、入口、出口或客户" aria-label="搜索线路" value="${esc(state.search)}"><select data-chain-filter aria-label="筛选线路"><option value="all"${selected('all',state.chainFilter)}>全部状态</option><option value="active"${selected('active',state.chainFilter)}>运行中</option><option value="deploying"${selected('deploying',state.chainFilter)}>部署中</option><option value="degraded"${selected('degraded',state.chainFilter)}>异常</option><option value="failed"${selected('failed',state.chainFilter)}>测试不通</option><option value="untested"${selected('untested',state.chainFilter)}>未测试</option></select><span class="tag" data-chain-count>${filtered.length} / ${state.chains.length} 条</span></div><div class="toolbar"><button data-action="select-chain-page"${selectable.length && state.selectedChains.size < 25 ? '' : ' disabled'}>选择本页可测线路</button><button data-action="clear-chain-selection"${state.selectedChains.size ? '' : ' disabled'}>清除选择</button><button class="primary" data-action="probe-batch"${state.selectedChains.size ? '' : ' disabled'}>批量测试 ${state.selectedChains.size} 条</button></div></div>
+    <div class="chain-list"><div class="table-wrap"><table class="chain-table"><thead><tr><th>线路</th><th>入口 / 节点设备</th><th>出口</th><th>客户</th><th>状态</th><th>互通诊断</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty('没有匹配线路','调整筛选条件，或创建第一条线路')}</td></tr>`}</tbody></table></div><div class="chain-pagination"><span>第 ${state.chainPage + 1} / ${pages} 页 · 每页 25 条</span><div class="actions"><button data-action="chain-prev"${state.chainPage ? '' : ' disabled'}>上一页</button><button data-action="chain-next"${state.chainPage + 1 < pages ? '' : ' disabled'}>下一页</button></div></div></div></section>`;
 }
 
 function probeDetail(chain) {
@@ -314,7 +364,19 @@ function render() {
   }
   $('#content').classList.remove('vault-content');
   const views = { overview: renderOverview, servers: renderServers, customers: renderCustomers, chains: renderChains, deployments: renderDeployments, commands: renderCommands, operations: renderOperations };
+  const focused = document.activeElement?.matches('[data-search], [data-chain-search]') ? document.activeElement : null;
+  const focusPosition = focused ? [focused.selectionStart, focused.selectionEnd] : null;
+  const open = $$('details[data-server-details][open], details[data-hop-more][open]', $('#content')).map((item) =>
+    item.dataset.serverDetails ? ['serverDetails',item.dataset.serverDetails] : ['hopMore',item.dataset.hopMore]);
   $('#content').innerHTML = views[state.page]();
+  for (const [key,value] of open) {
+    const detail = $$(`details[data-${key === 'serverDetails' ? 'server-details' : 'hop-more'}]`, $('#content')).find((item) => item.dataset[key] === value);
+    if (detail) detail.open = true;
+  }
+  if (focused) {
+    const input = $(`[${focused.hasAttribute('data-chain-search') ? 'data-chain-search' : 'data-search'}]`, $('#content'));
+    if (input) { input.focus(); input.setSelectionRange(...focusPosition); }
+  }
 }
 
 function modal(kicker, title, body) {
@@ -460,7 +522,7 @@ document.addEventListener('submit', async (event) => {
       const resourceId = data.get('resourceId');
       const payload = { name:data.get('name'), role:data.get('role'), region:data.get('region'), publicAddress:data.get('publicAddress'), publicAddressV6:data.get('publicAddressV6'), tlsDomain:data.get('tlsDomain'), portRangeStart:Number(data.get('portRangeStart')), portRangeEnd:Number(data.get('portRangeEnd')), labels:splitList(data.get('labels')) };
       await api(resourceId ? `/api/servers/${resourceId}` : '/api/servers', { method:resourceId ? 'PATCH' : 'POST', body:JSON.stringify(payload) });
-      $('#modal').close(); toast(resourceId ? '设备信息已更新' : '设备已添加'); await load('servers');
+      $('#modal').close(); toast(resourceId ? '设备信息已更新' : '设备已添加'); watchProgress(); await load('servers');
     } else if (form.id === 'customer-form') {
       const resourceId = data.get('resourceId');
       const payload = { name:data.get('name'), group:data.get('group'), trafficLimitBytes:Number(data.get('trafficGb') || 0) * 1024 ** 3, expiresAt:expiryIso(data), ipLimit:Number(data.get('ipLimit') || 0), deviceLimit:Number(data.get('deviceLimit') || 0), tags:splitList(data.get('tags')), notes:data.get('notes') };
@@ -470,7 +532,7 @@ document.addEventListener('submit', async (event) => {
       const resourceId = data.get('resourceId');
       const payload = { name:data.get('name'), topology:data.get('topology'), networkMode:data.get('networkMode'), relayServerIds:data.getAll('relayServerIds'), exitServerId:data.get('exitServerId') || null, customerIds:data.getAll('customerIds'), relayProtocol:data.get('relayProtocol'), exitProtocol:data.get('exitProtocol') || null, relayPortMode:data.get('relayPortMode'), relayPort:data.get('relayPort') || null, exitPortMode:data.get('exitPortMode') || null, exitPort:data.get('exitPort') || null, realityServerName:data.get('realityServerName'), realityDestPort:Number(data.get('realityDestPort') || 443) };
       const result = await api(resourceId ? `/api/chains/${resourceId}` : '/api/chains', { method:resourceId ? 'PATCH' : 'POST', body:JSON.stringify(payload) });
-      $('#modal').close(); toast(result.requiresRedeploy ? '修改已保存；原节点仍按旧协议运行，请点击“应用修改”' : (resourceId ? '线路已更新' : '线路草稿已创建')); await load('chains');
+      $('#modal').close(); toast(result.requiresRedeploy ? '修改已保存；原节点仍按旧协议运行，请点击“应用修改”' : (resourceId ? '线路已更新' : '线路草稿已创建')); watchProgress(); await load('chains');
     } else if (form.id === 'account-form') {
       if (data.get('newPassword') !== data.get('confirmPassword')) throw new Error('两次输入的新密码不一致');
       await api('/api/account', { method:'PATCH', body:JSON.stringify({ username:data.get('username'), currentPassword:data.get('currentPassword'), newPassword:data.get('newPassword') }) });
@@ -504,7 +566,27 @@ document.addEventListener('click', async (event) => {
       subscriptionModal(result.customer); toast('订阅地址已重置');
     }
     else if (action === 'add-chain') chainForm();
-    else if (action === 'probe-chain') { const result = await api(`/api/chains/${itemId}/probe`, { method:'POST', body:'{}' }); toast(`已向 ${result.queued} 台入口机下发一次测试`); await load('chains'); }
+    else if (action === 'chain-prev' || action === 'chain-next') {
+      state.chainPage += action === 'chain-prev' ? -1 : 1; render();
+    }
+    else if (action === 'select-chain-page') {
+      for (const chain of visibleChains().slice(state.chainPage * 25, (state.chainPage + 1) * 25))
+        if ((chain.topology || 'forward') !== 'direct' && ['active','partially_suspended'].includes(chain.status) && state.selectedChains.size < 25) state.selectedChains.add(chain.id);
+      render();
+    }
+    else if (action === 'clear-chain-selection') { state.selectedChains.clear(); render(); }
+    else if (action === 'probe-batch') {
+      const ids = [...state.selectedChains];
+      if (!ids.length) return;
+      if (ids.length > 25) { toast('每批最多 25 条线路，请分批测试', true); return; }
+      const result = await api('/api/chains/probe-batch', { method:'POST', body:JSON.stringify({ chainIds:ids }) });
+      state.selectedChains.clear(); watchProgress();
+      toast(`已排队 ${result.routesQueued} 条线路、${result.queued} 个入口${result.skipped.length ? `；${result.skipped.length} 条暂不可测` : ''}`,
+        !result.queued);
+      if (result.skipped.length) modal('BATCH DIAGNOSTIC', '批量测试反馈', `<div class="stack"><p>成功排队 ${result.routesQueued} 条线路、${result.queued} 个入口。</p><div class="batch-errors">${result.skipped.map((entry) => `<div>${esc(state.chains.find((chain) => chain.id === entry.chainId)?.name || entry.chainId)}：${esc(entry.reason)}</div>`).join('')}</div><div class="form-actions"><button data-close>关闭</button></div></div>`);
+      await load('chains');
+    }
+    else if (action === 'probe-chain') { const result = await api(`/api/chains/${itemId}/probe`, { method:'POST', body:'{}' }); toast(`已向 ${result.queued} 台入口机下发一次测试`); watchProgress(); await load('chains'); }
     else if (action === 'probe-detail') probeDetail(state.chains.find((item) => item.id === itemId));
     else if (action === 'edit-chain') {
       if (!state.protocols.length) { const result = await api('/api/protocols'); state.protocols = result.profiles; state.realityPresets = result.realityPresets || []; }
@@ -540,11 +622,11 @@ document.addEventListener('click', async (event) => {
     else if (action === 'toggle-customer') {
       const item = state.customers.find((entry) => entry.id === itemId);
       await api(`/api/customers/${itemId}`, { method:'PATCH', body:JSON.stringify({ status:item.status === 'active' ? 'suspended' : 'active' }) }); toast('客户状态已更新'); await load();
-    } else if (action === 'deploy-chain' && confirm('现在向所选设备下发这条线路？')) { await api(`/api/chains/${itemId}/deploy`, { method:'POST', body:'{}' }); toast('部署任务已进入队列'); await load(); }
-    else if (action === 'restore-chain' && confirm('使用原端口和节点凭据恢复这条线路？如端口已被其他线路占用，请改用全新部署。')) { const result = await api(`/api/chains/${itemId}/restore`, { method:'POST', body:'{}' }); toast(`已排队恢复 ${result.jobs} 项原资源`); await load(); }
-    else if (action === 'redeploy-chain' && confirm('重新部署会先移除旧资源，再自动创建新资源。确认继续？')) { await api(`/api/chains/${itemId}/redeploy`, { method:'POST', body:'{}' }); toast('线路已进入安全重建流程'); await load(); }
-    else if (action === 'repair-chain' && confirm('仅重试当前失败的部署项？')) { await api(`/api/chains/${itemId}/repair`, { method:'POST', body:'{}' }); toast('修复任务已进入队列'); await load(); }
-    else if (action === 'remove-chain' && confirm('停用会从相关设备移除配置，确认继续？')) { await api(`/api/chains/${itemId}/remove`, { method:'POST', body:'{}' }); toast('移除任务已进入队列'); await load(); }
+    } else if (action === 'deploy-chain' && confirm('现在向所选设备下发这条线路？')) { await api(`/api/chains/${itemId}/deploy`, { method:'POST', body:'{}' }); toast('部署任务已进入队列'); watchProgress(); await load(); }
+    else if (action === 'restore-chain' && confirm('使用原端口和节点凭据恢复这条线路？如端口已被其他线路占用，请改用全新部署。')) { const result = await api(`/api/chains/${itemId}/restore`, { method:'POST', body:'{}' }); toast(`已排队恢复 ${result.jobs} 项原资源`); watchProgress(); await load(); }
+    else if (action === 'redeploy-chain' && confirm('重新部署会先移除旧资源，再自动创建新资源。确认继续？')) { await api(`/api/chains/${itemId}/redeploy`, { method:'POST', body:'{}' }); toast('线路已进入安全重建流程'); watchProgress(); await load(); }
+    else if (action === 'repair-chain' && confirm('仅重试当前失败的部署项？')) { await api(`/api/chains/${itemId}/repair`, { method:'POST', body:'{}' }); toast('修复任务已进入队列'); watchProgress(); await load(); }
+    else if (action === 'remove-chain' && confirm('停用会从相关设备移除配置，确认继续？')) { await api(`/api/chains/${itemId}/remove`, { method:'POST', body:'{}' }); toast('移除任务已进入队列'); watchProgress(); await load(); }
     else if (action === 'delete-chain' && confirm('确定删除这条线路？未完成的部署会取消；系统会给相关设备排队清理遗留资源。运行中的资源须先停用。')) { const result = await api(`/api/chains/${itemId}`, { method:'DELETE' }); toast(result.cleanupPending ? `线路已移除，${result.cleanupPending} 个设备资源待 Agent 确认清理` : '线路已删除'); await load(); }
     else if (action === 'download-backup') location.href = '/api/backup';
     else if (action === 'restore-backup') {
@@ -559,6 +641,15 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-chain-select]')) {
+    if (event.target.checked) state.selectedChains.add(event.target.value);
+    else state.selectedChains.delete(event.target.value);
+    render();
+    return;
+  }
+  if (event.target.matches('[data-chain-filter]')) {
+    state.chainFilter = event.target.value; state.chainPage = 0; render(); return;
+  }
   if (event.target.matches('[data-row-actions]') && event.target.value) {
     const button = document.createElement('button'); button.dataset.action = event.target.value; button.dataset.id = event.target.dataset.id;
     event.target.value = ''; button.hidden = true; document.body.append(button); button.click(); button.remove(); return;
@@ -581,10 +672,17 @@ document.addEventListener('change', (event) => {
 });
 
 function updateListSearch(input) {
-  if (!['servers','customers'].includes(state.page)) return;
+  if (!['servers','customers','chains'].includes(state.page)) return;
   state.search = input.value;
-  const markup = state.page === 'servers' ? renderServers() : renderCustomers();
+  if (state.page === 'chains') state.chainPage = 0;
+  const markup = state.page === 'servers' ? renderServers() : state.page === 'customers' ? renderCustomers() : renderChains();
   const template = document.createElement('template'); template.innerHTML = markup;
+  if (state.page === 'chains') {
+    $('.chain-list')?.replaceWith($('.chain-list', template.content));
+    const count = $('[data-chain-count]'); if (count) count.textContent = $('[data-chain-count]', template.content).textContent;
+    $('[data-action="select-chain-page"]').disabled = $('[data-action="select-chain-page"]', template.content).disabled;
+    return;
+  }
   const body = $('.table-wrap tbody');
   if (body) body.replaceWith($('tbody', template.content));
   const count = $('[data-filter-count]');
@@ -597,10 +695,10 @@ document.addEventListener('input', (event) => {
     $$('[data-picker-option]', picker).forEach((option) => { option.hidden = !option.dataset.query.includes(query); });
     return;
   }
-  if (event.target.matches('[data-search]') && !event.isComposing) updateListSearch(event.target);
+  if (event.target.matches('[data-search], [data-chain-search]') && !event.isComposing) updateListSearch(event.target);
 });
 document.addEventListener('compositionend', (event) => {
-  if (event.target.matches('[data-search]')) updateListSearch(event.target);
+  if (event.target.matches('[data-search], [data-chain-search]')) updateListSearch(event.target);
 });
 
 function closeSidebar() { $('#app').classList.remove('sidebar-open'); }
@@ -621,11 +719,18 @@ window.addEventListener('message', (event) => {
   setTheme(preferred);
   try {
     const session = await api('/api/session');
-    if (!session.authenticated) return showLogin();
-    state.session = session; showApp(); setPage(initialPage());
+    if (!session.authenticated) showLogin();
+    else { state.session = session; showApp(); setPage(initialPage()); }
   } catch { showLogin(); }
+  let lastCheck = 0;
   setInterval(() => {
-    if (state.session && document.visibilityState === 'visible' && !$('#modal').open &&
-        !state.page.startsWith('vault-') && !document.activeElement?.matches('input, select, textarea')) load();
-  }, 45000);
+    if (!state.session || document.visibilityState !== 'visible' || $('#modal').open ||
+        document.activeElement?.matches('input:not([data-search]):not([data-chain-search]), select, textarea')) return;
+    if (['servers','chains','deployments'].includes(state.page)) {
+      const interval = Date.now() < fastRefreshUntil || (state.page === 'chains' && state.probes.some((item) => ['queued','running'].includes(item.status))) ? 5000 : 15000;
+      if (Date.now() - lastCheck >= interval) { lastCheck = Date.now(); refreshLive(); }
+    } else if (!state.page.startsWith('vault-') && Date.now() - lastCheck >= 45000) {
+      lastCheck = Date.now(); load();
+    }
+  }, 5000);
 })();

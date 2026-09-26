@@ -19,7 +19,7 @@ const DATA_FILE = process.env.NG_DATA_FILE || path.join(APP_ROOT, 'data', 'nexus
 const HOST = process.env.NG_HOST || '127.0.0.1';
 const PORT = Number(process.env.NG_PORT || 8787);
 const COOKIE_SECURE = process.env.NG_COOKIE_SECURE !== 'false';
-const VERSION = '0.6.9';
+const VERSION = '0.6.10';
 
 const store = new Store(DATA_FILE);
 let sessions;
@@ -67,6 +67,50 @@ function latestHopProbes(data) {
     });
   }
   return [...latest.values()];
+}
+
+function queueHopProbe(data, chainId, actor, limit = 50) {
+  const chain = data.chains.find((item) => item.id === chainId);
+  if (!chain) throw Object.assign(new Error('线路不存在'), { statusCode: 404 });
+  if (chain.topology === 'direct' || !['active', 'partially_suspended'].includes(chain.status))
+    throw Object.assign(new Error('请先完成转发线路部署，再测试入口到出口'), { statusCode: 409 });
+  const relays = [...new Map(data.deployments.filter((item) =>
+    item.chainId === chain.id && !item.archived && item.role === 'relay' && item.status === 'active' &&
+    item.generation === chain.generation).map((item) => [item.serverId, item])).values()];
+  if (!relays.length) throw Object.assign(new Error('线路没有运行中的入口部署'), { statusCode: 409 });
+  if (relays.length > 20 || relays.length > limit)
+    throw Object.assign(new Error('本次任务数量超出限制，请缩小测试范围'), { statusCode: 429 });
+  const now = Date.now();
+  const running = data.jobs.filter((job) => job.action === 'probe_hop' && ['queued','running'].includes(job.status));
+  if (running.length + relays.length > 50)
+    throw Object.assign(new Error('诊断任务较多，请等待已有测试完成'), { statusCode: 429 });
+  if (data.jobs.some((job) => job.action === 'probe_hop' && job.chainId === chain.id && now - Date.parse(job.createdAt) < 60000))
+    throw Object.assign(new Error('刚刚测试过这条线路，请在 60 秒后重试'), { statusCode: 429 });
+  for (const relay of relays) {
+    const exit = data.deployments.find((item) => item.id === relay.exitDeploymentId && item.status === 'active' && !item.archived);
+    if (!exit) throw Object.assign(new Error('部分入口的出口资源尚未就绪，请等待部署完成'), { statusCode: 409 });
+    if (data.jobs.some((job) => [relay.id, exit.id].includes(job.deploymentId) &&
+        job.action !== 'probe_hop' && ['queued','running'].includes(job.status)))
+      throw Object.assign(new Error('线路正在执行部署任务，请等待配置稳定'), { statusCode: 409 });
+    const server = data.servers.find((item) => item.id === relay.serverId);
+    const agent = data.agents.find((item) => item.serverId === relay.serverId && item.status === 'active');
+    if (!server || server.status !== 'online' || now - Date.parse(server.lastSeenAt || 0) > 120000)
+      throw Object.assign(new Error(`${server?.name || '入口'} Agent 未在线`), { statusCode: 409 });
+    if (!supportsHopProbe(agent?.version))
+      throw Object.assign(new Error(`${server.name} Agent 需要先运行 ng-agent update`), { statusCode: 409 });
+    if (running.filter((job) => job.serverId === relay.serverId).length +
+        relays.filter((item) => item.serverId === relay.serverId).length > 8)
+      throw Object.assign(new Error(`${server.name} 的诊断队列已满，请稍后重试`), { statusCode: 429 });
+  }
+  const created = relays.map((relay) => {
+    const job = { id: id('job'), chainId: chain.id, generation: chain.generation, serverId: relay.serverId, deploymentId: relay.id,
+      action: 'probe_hop', payload: { resourceId: relay.resourceId }, status: 'queued', attempts: 0,
+      createdAt: nowIso(), updatedAt: nowIso(), error: null, leaseUntil: null };
+    data.jobs.push(job);
+    return job.id;
+  });
+  audit(data, actor, 'probe_route', chain.id, { count: created.length });
+  return created.length;
 }
 
 function optionalIso(value, label = '日期') {
@@ -479,6 +523,18 @@ async function handleAdminApi(req, res, pathname) {
     sendJson(res, 200, { servers: store.data.servers.map(publicServer) });
     return true;
   }
+  if (req.method === 'GET' && pathname === '/api/live') {
+    const data = store.data;
+    sendJson(res, 200, {
+      servers: data.servers.map((item) => ({ id:item.id, status:item.status, lastSeenAt:item.lastSeenAt,
+        version:data.agents.find((agent) => agent.serverId === item.id && agent.status === 'active')?.version || null,
+        usageAt:item.usage?.lastReportAt || null, engineStatus:item.engine?.status || null })),
+      chains: data.chains.map((item) => ({ id:item.id, status:item.status, generation:item.generation, updatedAt:item.updatedAt, lastError:item.lastError || null })),
+      deployments: data.deployments.filter((item) => !item.archived).map((item) => ({ id:item.id, status:item.status, updatedAt:item.updatedAt, error:item.error ? redactSecrets(item.error) : null })),
+      probes: latestHopProbes(data)
+    });
+    return true;
+  }
   if (req.method === 'POST' && pathname === '/api/servers') {
     const body = await readJson(req);
     const server = await store.transaction((data) => {
@@ -727,49 +783,31 @@ async function handleAdminApi(req, res, pathname) {
     return true;
   }
   const deploy = route('/api/chains/:id/deploy', pathname);
+  if (req.method === 'POST' && pathname === '/api/chains/probe-batch') {
+    const body = await readJson(req);
+    if (!Array.isArray(body.chainIds) || body.chainIds.length < 1 || body.chainIds.length > 25 ||
+        body.chainIds.some((item) => typeof item !== 'string' || item.length > 80) ||
+        new Set(body.chainIds).size !== body.chainIds.length)
+      throw Object.assign(new Error('一次请选择 1–25 条不同的线路'), { statusCode: 400 });
+    const result = await store.transaction((data) => {
+      let queued = 0;
+      const skipped = [];
+      for (const chainId of body.chainIds) {
+        try { queued += queueHopProbe(data, chainId, actor, 30 - queued); }
+        catch (error) {
+          if (!error.statusCode) throw error;
+          skipped.push({ chainId, reason: error.message });
+        }
+      }
+      return { queued, routesQueued:body.chainIds.length - skipped.length, skipped };
+    });
+    sendJson(res, 202, result);
+    return true;
+  }
   const probe = route('/api/chains/:id/probe', pathname);
   if (probe && req.method === 'POST') {
-    const jobs = await store.transaction((data) => {
-      const chain = data.chains.find((item) => item.id === probe.id);
-      if (!chain) throw Object.assign(new Error('线路不存在'), { statusCode: 404 });
-      if (chain.topology === 'direct' || !['active', 'partially_suspended'].includes(chain.status))
-        throw Object.assign(new Error('请先完成转发线路部署，再测试入口到出口'), { statusCode: 409 });
-      const relays = [...new Map(data.deployments.filter((item) =>
-        item.chainId === chain.id && !item.archived && item.role === 'relay' && item.status === 'active' &&
-        item.generation === chain.generation).map((item) => [item.serverId, item])).values()];
-      if (!relays.length) throw Object.assign(new Error('线路没有运行中的入口部署'), { statusCode: 409 });
-      if (relays.length > 20) throw Object.assign(new Error('单次最多测试 20 台入口，请缩小线路规模'), { statusCode: 409 });
-      const now = Date.now();
-      if (data.jobs.filter((job) => job.action === 'probe_hop' && ['queued','running'].includes(job.status)).length + relays.length > 50)
-        throw Object.assign(new Error('诊断任务较多，请等待已有测试完成'), { statusCode: 429 });
-      const recent = data.jobs.filter((job) => job.action === 'probe_hop' && job.chainId === chain.id && now - Date.parse(job.createdAt) < 60000);
-      if (recent.length) throw Object.assign(new Error('刚刚测试过这条线路，请在 60 秒后重试'), { statusCode: 429 });
-      for (const relay of relays) {
-        const exit = data.deployments.find((item) => item.id === relay.exitDeploymentId && item.status === 'active' && !item.archived);
-        if (!exit) throw Object.assign(new Error('部分入口的出口资源尚未就绪，请等待部署完成'), { statusCode: 409 });
-        if (data.jobs.some((job) => [relay.id, exit.id].includes(job.deploymentId) &&
-            job.action !== 'probe_hop' && ['queued','running'].includes(job.status)))
-          throw Object.assign(new Error('线路正在执行部署任务，请等待配置稳定'), { statusCode: 409 });
-        const server = data.servers.find((item) => item.id === relay.serverId);
-        const agent = data.agents.find((item) => item.serverId === relay.serverId && item.status === 'active');
-        if (!server || server.status !== 'online' || now - Date.parse(server.lastSeenAt || 0) > 120000)
-          throw Object.assign(new Error(`${server?.name || '入口'} Agent 未在线`), { statusCode: 409 });
-        if (!supportsHopProbe(agent?.version))
-          throw Object.assign(new Error(`${server.name} Agent 需要先运行 ng-agent update`), { statusCode: 409 });
-        if (data.jobs.some((job) => job.serverId === relay.serverId && job.action === 'probe_hop' && ['queued','running'].includes(job.status)))
-          throw Object.assign(new Error(`${server.name} 已有连通性测试进行中`), { statusCode: 409 });
-      }
-      const created = relays.map((relay) => {
-        const job = { id: id('job'), chainId: chain.id, generation: chain.generation, serverId: relay.serverId, deploymentId: relay.id,
-          action: 'probe_hop', payload: { resourceId: relay.resourceId }, status: 'queued', attempts: 0,
-          createdAt: nowIso(), updatedAt: nowIso(), error: null, leaseUntil: null };
-        data.jobs.push(job);
-        return job.id;
-      });
-      audit(data, actor, 'probe_route', chain.id, { count: created.length });
-      return created;
-    });
-    sendJson(res, 202, { queued: jobs.length });
+    const queued = await store.transaction((data) => queueHopProbe(data, probe.id, actor));
+    sendJson(res, 202, { queued });
     return true;
   }
   if (deploy && req.method === 'POST') {
