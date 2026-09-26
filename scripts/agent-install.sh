@@ -146,7 +146,7 @@ if [[ "$TOKEN_PROMPT" == 1 ]]; then
   exec 3>&-
 fi
 [[ -n "$TOKEN" ]] || die '注册令牌不能为空'
-enroll_json="$(printf '%s' "$TOKEN" | node -e 'const token=require("node:fs").readFileSync(0,"utf8");process.stdout.write(JSON.stringify({token,hostname:require("node:os").hostname(),version:"0.6.8",system:{platform:process.platform,arch:process.arch}}))')"
+enroll_json="$(printf '%s' "$TOKEN" | node -e 'const token=require("node:fs").readFileSync(0,"utf8");process.stdout.write(JSON.stringify({token,hostname:require("node:os").hostname(),version:"0.6.9",system:{platform:process.platform,arch:process.arch}}))')"
 TOKEN=''
 response="$(printf '%s' "$enroll_json" | curl -fsS --proto '=https' --proto-redir '=https' -H 'content-type: application/json' --data-binary @- "${CONTROLLER%/}/api/agent/enroll")" || die "注册失败，请检查地址和令牌"
 enroll_json=''

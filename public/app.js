@@ -2,7 +2,7 @@
 
 const state = {
   session: null, page: 'overview', overview: null, servers: [], customers: [],
-  chains: [], deployments: [], jobs: [], protocols: [], realityPresets: [], search: '', version: '0.6.8'
+  chains: [], deployments: [], jobs: [], probes: [], protocols: [], realityPresets: [], search: '', version: '0.6.9'
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -78,16 +78,16 @@ async function load(page = state.page) {
   try {
     if (page === 'overview') {
       const [overview, servers, customers, routes] = await Promise.all([api('/api/overview'), api('/api/servers'), api('/api/customers'), api('/api/chains')]);
-      state.overview = overview; state.version = overview.version || state.version; state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments;
+      state.overview = overview; state.version = overview.version || state.version; state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments; state.probes = routes.probes || [];
     } else if (page === 'servers') state.servers = (await api('/api/servers')).servers;
     else if (page === 'customers') state.customers = (await api('/api/customers')).customers;
     else if (page === 'chains') {
       const [servers, customers, routes, protocols] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains'), api('/api/protocols')]);
-      state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments;
+      state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments; state.probes = routes.probes || [];
       state.protocols = protocols.profiles; state.realityPresets = protocols.realityPresets || [];
     } else if (page === 'deployments') {
       const [servers, customers, routes] = await Promise.all([api('/api/servers'), api('/api/customers'), api('/api/chains')]);
-      state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments;
+      state.servers = servers.servers; state.customers = customers.customers; state.chains = routes.chains; state.deployments = routes.deployments; state.probes = routes.probes || [];
     } else if (page.startsWith('vault-')) { /* SubVault checks the NexusGate session on each management request. */ }
     else if (page === 'commands') { /* Command reference needs no API request. */ }
     else if (page === 'operations') {
@@ -95,7 +95,18 @@ async function load(page = state.page) {
       state.jobs = jobs.jobs; state.servers = servers.servers; state.overview = overview; state.version = overview.version || state.version;
     }
     render();
+    scheduleProbeRefresh();
   } catch (error) { toast(error.message, true); }
+}
+
+let probeRefresh = null;
+function scheduleProbeRefresh() {
+  if (state.page !== 'chains' || !state.probes.some((item) => ['queued','running'].includes(item.status)) || probeRefresh) return;
+  probeRefresh = setTimeout(() => {
+    probeRefresh = null;
+    if (state.page === 'chains' && state.session && document.visibilityState === 'visible' && !$('#modal').open) load('chains');
+    else if (state.page === 'chains' && state.session) scheduleProbeRefresh();
+  }, 4000);
 }
 
 function setPage(page) {
@@ -205,12 +216,29 @@ function renderChains() {
     const exit = direct ? '本机直出' : ((state.servers.find((item) => item.id === chain.exitServerId) || {}).name || '已删除');
     const applied = state.deployments.filter((item) => item.chainId === chain.id && ['active','queued','deploying'].includes(item.status) && item.role !== 'exit');
     const drift = applied.some((item) => item.protocol !== chain.relayProtocol);
+    const probes = state.probes.filter((item) => item.chainId === chain.id && chain.relayServerIds.includes(item.serverId));
+    const waiting = probes.filter((item) => ['queued','running'].includes(item.status)).length;
+    const passed = probes.filter((item) => item.status === 'completed' && item.probe?.reachable).length;
+    const failed = probes.filter((item) => item.status === 'failed' || (item.status === 'completed' && !item.probe?.reachable)).length;
+    const summary = waiting ? `测试中 ${waiting} 台` : probes.length ? `可连 ${passed} · 不通 ${failed}` : '尚未测试';
+    const latest = probes.reduce((at, item) => !at || item.at > at ? item.at : at, null);
     return `<tr><td><strong>${esc(chain.name)}</strong><small>${esc(topologyText[chain.topology || 'forward'])} · ${esc(path)}</small>${drift ? '<small class="error-detail">编辑的协议尚未应用，当前节点见“部署与链接”</small>' : ''}</td>
       <td>${esc(names(chain.relayServerIds, state.servers))}<small>${esc(chain.networkMode || 'ipv4').toUpperCase()}</small></td><td>${esc(exit)}</td>
-      <td>${esc(names(chain.customerIds, state.customers))}</td><td>${status(chain.status)}${chain.lastError ? `<small class="error-detail" title="${esc(chain.lastError)}">${esc(chain.lastError)}</small>` : ''}</td><td>${compactChainActions(chain)}</td></tr>`;
+      <td>${esc(names(chain.customerIds, state.customers))}</td><td>${status(chain.status)}${chain.lastError ? `<small class="error-detail" title="${esc(chain.lastError)}">${esc(chain.lastError)}</small>` : ''}</td>
+      <td>${direct ? '<span class="muted">本机直连</span>' : `<div class="hop-diagnostic"><b class="${failed ? 'error-detail' : ''}">${esc(summary)}</b>${latest ? `<small>${fmtDate(latest)}</small>` : ''}<div class="actions"><button data-action="probe-chain" data-id="${esc(chain.id)}"${waiting || !['active','partially_suspended'].includes(chain.status) ? ' disabled' : ''}>测试互通</button>${probes.length ? `<button data-action="probe-detail" data-id="${esc(chain.id)}">详情</button>` : ''}</div></div>`}</td><td>${compactChainActions(chain)}</td></tr>`;
   }).join('');
-  return `<div class="page-intro"><p>“转发线路”把多个客户端入口汇聚到一个出口；“单机直连”无需出口机，直接在任意设备创建节点。编辑运行中线路后，点击“应用修改”安全重建。</p><button class="primary" data-action="add-chain">＋ 新建线路</button></div>
-    <section class="panel"><div class="table-wrap"><table><thead><tr><th>线路</th><th>入口 / 节点设备</th><th>出口</th><th>客户</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="6">${empty('还没有线路','准备好设备和客户后创建第一条线路')}</td></tr>`}</tbody></table></div></section>`;
+  return `<div class="page-intro"><p>转发线路部署后可按需测试入口到出口的 TCP 建连时间。结果包含 DNS 与建连，不能证明协议认证、客户端可用性或端到端速度；每条线路 60 秒内最多测试一次。</p><button class="primary" data-action="add-chain">＋ 新建线路</button></div>
+    <section class="panel"><div class="table-wrap"><table><thead><tr><th>线路</th><th>入口 / 节点设备</th><th>出口</th><th>客户</th><th>状态</th><th>互通诊断</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty('还没有线路','准备好设备和客户后创建第一条线路')}</td></tr>`}</tbody></table></div></section>`;
+}
+
+function probeDetail(chain) {
+  const rows = chain.relayServerIds.map((serverId) => {
+    const server = state.servers.find((item) => item.id === serverId);
+    const job = state.probes.find((item) => item.chainId === chain.id && item.serverId === serverId);
+    const outcome = !job ? '尚未测试' : job.status === 'completed' ? (job.probe?.reachable ? `${job.probe.latencyMs} ms` : esc(job.probe?.reason || '连接失败')) : job.status === 'failed' ? esc(job.error || 'Agent 执行失败') : esc(statusText[job.status] || job.status);
+    return `<tr><td>${esc(server?.name || '已删除设备')}</td><td>${outcome}</td><td>${job ? fmtDate(job.at) : '—'}</td></tr>`;
+  }).join('');
+  modal('HOP DIAGNOSTIC', `${chain.name} · 入口到出口`, `<div class="stack"><div class="notice">仅测入口机到已部署出口端口的一次 TCP 握手，单位 ms。超时为 3 秒；不会发送代理业务流量。若可连但客户端仍不通，继续检查协议认证、客户端订阅和防火墙。</div><div class="table-wrap"><table><thead><tr><th>入口设备</th><th>测试结果</th><th>时间</th></tr></thead><tbody>${rows}</tbody></table></div><div class="form-actions"><button data-close>关闭</button></div></div>`);
 }
 
 function renderDeployments() {
@@ -476,6 +504,8 @@ document.addEventListener('click', async (event) => {
       subscriptionModal(result.customer); toast('订阅地址已重置');
     }
     else if (action === 'add-chain') chainForm();
+    else if (action === 'probe-chain') { const result = await api(`/api/chains/${itemId}/probe`, { method:'POST', body:'{}' }); toast(`已向 ${result.queued} 台入口机下发一次测试`); await load('chains'); }
+    else if (action === 'probe-detail') probeDetail(state.chains.find((item) => item.id === itemId));
     else if (action === 'edit-chain') {
       if (!state.protocols.length) { const result = await api('/api/protocols'); state.protocols = result.profiles; state.realityPresets = result.realityPresets || []; }
       chainForm(state.chains.find((item) => item.id === itemId));

@@ -59,11 +59,12 @@ test('old Hysteria 2 resources are repaired without rotating authentication or c
   assert.throws(() => combinedConfig([{ inbounds:[{ protocol:'hysteria', settings:{ version:2 } }] }]), /认证账户/);
 });
 
-test('UDP readiness inspection finds only ports owned by the target process', async () => {
+test('UDP readiness inspection finds only ports owned by the target process', async (t) => {
   const socket = dgram.createSocket('udp4');
   const other = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio:'ignore' });
   try {
     await new Promise((resolve) => socket.bind(0, '127.0.0.1', resolve));
+    if (!fs.existsSync(`/proc/${process.pid}/fd`)) { t.skip('host /proc does not expose this test process'); return; }
     assert.ok(udpPortsForPid(process.pid).has(socket.address().port));
     assert.equal(udpPortsForPid(other.pid).has(socket.address().port), false);
   } finally { socket.close(); other.kill(); }

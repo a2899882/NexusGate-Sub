@@ -3,9 +3,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const net = require('node:net');
 const { spawnSync } = require('node:child_process');
 
-const VERSION = '0.6.8';
+const VERSION = '0.6.9';
 const CONTROLLER = String(process.env.NG_CONTROLLER || '').replace(/\/+$/, '');
 const AGENT_KEY = process.env.NG_AGENT_KEY || '';
 const XRAY_BIN = process.env.NG_XRAY_BIN || '/usr/local/bin/xray';
@@ -304,12 +305,47 @@ async function deleteResource(payload) {
   return { removed: true };
 }
 
+// Probe only the outbound of a relay resource already installed on this Agent.
+// The controller cannot use this action to scan an arbitrary address or port.
+async function probeHop(payload) {
+  const resource = JSON.parse(fs.readFileSync(safeResourcePath(payload.resourceId), 'utf8'));
+  if (resource.meta?.kind !== 'relay') throw new Error('转发资源不存在或已变更，请重新部署');
+  const outbound = resource.outbounds?.[0];
+  const endpoint = outbound?.settings?.servers?.[0] || outbound?.settings?.vnext?.[0] || outbound;
+  const host = endpoint?.address || endpoint?.server;
+  const port = Number(endpoint?.port || endpoint?.server_port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535 ||
+      !['shadowsocks','socks','vless'].includes(outbound?.protocol || outbound?.type))
+    throw new Error('转发资源的出口地址无效，请重新部署');
+  const start = process.hrtime.bigint();
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    let finished = false;
+    const finish = (reachable, reason = null) => {
+      if (finished) return;
+      finished = true;
+      const latencyMs = reachable ? Math.round(Number(process.hrtime.bigint() - start) / 1e5) / 10 : null;
+      socket.destroy();
+      resolve({ reachable, latencyMs, reason });
+    };
+    // A wall-clock bound also covers a slow DNS resolution.
+    const timer = setTimeout(() => finish(false, '连接超时或 DNS 无响应'), 3000);
+    socket.once('connect', () => { clearTimeout(timer); finish(true); });
+    socket.once('error', (error) => {
+      clearTimeout(timer);
+      const reasons = { ECONNREFUSED:'目标端口拒绝连接', ENETUNREACH:'网络不可达', EHOSTUNREACH:'目标主机不可达', ENOTFOUND:'域名解析失败', EAI_AGAIN:'DNS 暂时不可用', ETIMEDOUT:'连接超时' };
+      finish(false, reasons[error.code] || '连接失败');
+    });
+  });
+}
+
 async function execute(job) {
   log('Executing', job.id, job.action);
   try {
     let result;
     if (job.action === 'apply_resource') result = await applyResource(job.payload);
     else if (job.action === 'delete_resource') result = await deleteResource(job.payload);
+    else if (job.action === 'probe_hop') result = await probeHop(job.payload);
     else throw new Error(`Unsupported job action: ${job.action}`);
     await request(`/api/agent/jobs/${encodeURIComponent(job.id)}/complete`, { method: 'POST', body: JSON.stringify({ success: true, result }) });
     log('Completed', job.id);
@@ -459,7 +495,14 @@ function serviceEpoch(service = 'nexusgate-xray') {
 
 function udpPortsForPid(pid) {
   const sockets = new Set();
-  for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+  let descriptors;
+  try { descriptors = fs.readdirSync(`/proc/${pid}/fd`); }
+  catch (error) {
+    // A monitored service may exit between reading its PID and inspecting fds.
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return new Set();
+    throw error;
+  }
+  for (const fd of descriptors) {
     try {
       const match = fs.readlinkSync(`/proc/${pid}/fd/${fd}`).match(/^socket:\[(\d+)\]$/);
       if (match) sockets.add(match[1]);
@@ -660,4 +703,4 @@ if (require.main === module) {
 
 module.exports = { parseX25519, activateConfig, activateSingBox, combinedConfig, combinedSingBoxConfig, applyResource,
   readObservations, readSingBoxObservations, parseUsageStats, queryUsage, installedCertificates,
-  udpPortsForPid, missingHysteriaListeners, systemInfo };
+  udpPortsForPid, missingHysteriaListeners, systemInfo, probeHop };

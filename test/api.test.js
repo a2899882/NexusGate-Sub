@@ -268,6 +268,25 @@ test('admin can create resources and queue a mixed-protocol chain', async (t) =>
   await completeNext(agentKeys[exit.id]);
   await completeNext(agentKey);
   const forwardEntry = forwardDeploy.find((item) => item.role === 'relay');
+  const oldProbe = await fetch(`${base}/api/chains/${forward.id}/probe`, { method:'POST', headers:{ cookie, 'x-csrf-token':session.csrf } });
+  assert.equal(oldProbe.status, 409);
+  assert.match((await oldProbe.json()).message, /ng-agent update/);
+  await fetch(`${base}/api/agent/heartbeat`, { method:'POST', headers:{ authorization:`Bearer ${agentKey}`, 'content-type':'application/json' },
+    body:JSON.stringify({ version:'0.6.9' }) });
+  assert.equal((await request(`/api/chains/${forward.id}/probe`, 'POST', {})).queued, 1);
+  const repeatedProbe = await fetch(`${base}/api/chains/${forward.id}/probe`, { method:'POST', headers:{ cookie, 'x-csrf-token':session.csrf } });
+  assert.equal(repeatedProbe.status, 429);
+  const diagnostic = (await (await fetch(`${base}/api/agent/poll`, { method:'POST', headers:{ authorization:`Bearer ${agentKey}` } })).json()).job;
+  assert.equal(diagnostic.action, 'probe_hop');
+  assert.deepEqual(diagnostic.payload, { resourceId: forwardEntry.resourceId });
+  const report = await fetch(`${base}/api/agent/jobs/${diagnostic.id}/complete`, { method:'POST',
+    headers:{ authorization:`Bearer ${agentKey}`, 'content-type':'application/json' },
+    body:JSON.stringify({ success:true, result:{ reachable:false, reason:'目标端口拒绝连接' } }) });
+  assert.equal(report.status, 200);
+  const probeResult = (await request('/api/chains')).probes.find((item) => item.chainId === forward.id);
+  assert.equal(probeResult.probe.reason, '目标端口拒绝连接');
+  assert.equal((await request('/api/chains')).chains.find((item) => item.id === forward.id).status, 'active');
+  assert.equal((await request('/api/jobs')).jobs.find((item) => item.id === diagnostic.id).probe.reachable, false);
   const forwardUri = (await request('/api/chains')).deployments.find((item) => item.id === forwardEntry.id).clientUri;
   const forwardUsage = await fetch(`${base}/api/agent/usage`, { method:'POST', headers:{ authorization:`Bearer ${agentKey}`, 'content-type':'application/json' },
     body:JSON.stringify({ epoch:'fwd-1', samples:[{ resourceId:forwardEntry.resourceId, uplink:2, downlink:5 }] }) });
